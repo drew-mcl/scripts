@@ -1,307 +1,399 @@
 import os
-import hashlib
-import وقت # For timestamping the report
-from collections import defaultdict
+from pathlib import Path
+from datetime import datetime
 
-# --- Configuration ---
-MAVEN_BUILD_DIR_NAME = "target"
-GRADLE_BUILD_DIR_NAME = "build"
-FILES_TO_IGNORE = {".DS_Store", "MANIFEST.MF"} # Add other common, irrelevant files
-# Consider adding specific sub-directories within target/build to ignore if they are known to be different
-# e.g., "maven-status", "tmp", "generated-sources" (unless you want to compare those)
-DIRECTORIES_TO_IGNORE_CONTENT_COMPARISON = {"classes", "test-classes", "generated-sources", "reports", "test-results", "tmp"}
-# For these directories, we'll primarily check for existence and file lists, not byte-for-byte content of all files within,
-# as contents (like compiled classes) can differ due to compiler versions or metadata even if sources are the same.
-
-def calculate_sha256(filepath):
-    """Calculates the SHA256 hash of a file."""
-    sha256_hash = hashlib.sha256()
-    try:
-        with open(filepath, "rb") as f:
-            for byte_block in iter(lambda: f.read(4096), b""):
-                sha256_hash.update(byte_block)
-        return sha256_hash.hexdigest()
-    except IOError:
-        return None
-
-def get_directory_contents(dir_path, ignore_files, ignore_dirs_content_comparison):
-    """
-    Scans a directory and returns a dictionary of files and their hashes,
-    and a set of subdirectories.
-    Skips content hashing for specified directories but lists their files.
-    """
-    contents = {"files": {}, "dirs": set()}
-    if not os.path.isdir(dir_path):
-        return contents
-
-    for item in os.listdir(dir_path):
-        if item in ignore_files:
-            continue
-        item_path = os.path.join(dir_path, item)
-        if os.path.isdir(item_path):
-            contents["dirs"].add(item)
-            # Optionally, if you want to list files within these ignored-content-dirs:
-            if item in ignore_dirs_content_comparison:
-                try:
-                    for sub_item in os.listdir(item_path):
-                        if os.path.isfile(os.path.join(item_path, sub_item)) and sub_item not in ignore_files:
-                             # Store with a special marker or just the name for existence check
-                            contents["files"][os.path.join(item, sub_item)] = "PRESENT_IN_IGNORED_CONTENT_DIR"
-                except OSError:
-                    pass # Can't list directory
-        elif os.path.isfile(item_path):
-            # Determine if parent is an ignored_content_dir
-            parent_dir_name = os.path.basename(os.path.dirname(item_path)) # This will be dir_path's name
-            # We are at the top level of MAVEN_BUILD_DIR_NAME or GRADLE_BUILD_DIR_NAME here.
-            # The check for DIRECTORIES_TO_IGNORE_CONTENT_COMPARISON applies to *subdirectories* of these.
-            contents["files"][item] = calculate_sha256(item_path)
-    return contents
-
-def compare_build_dirs(project_path, maven_dir_path, gradle_dir_path):
-    """
-    Compares the contents of Maven's target and Gradle's build directories.
-    Returns a dictionary with comparison results.
-    """
-    print(f"\n--- Comparing Project: {project_path} ---")
-    comparison_results = {
-        "project_path": project_path,
-        "maven_dir": maven_dir_path,
-        "gradle_dir": gradle_dir_path,
-        "maven_exists": os.path.isdir(maven_dir_path),
-        "gradle_exists": os.path.isdir(gradle_dir_path),
-        "matches": [],
-        "mismatches": [], # Files with same name, different content
-        "only_in_maven": [],
-        "only_in_gradle": [],
-        "common_dirs": [],
-        "overall_match": False # Default to False
-    }
-
-    if not comparison_results["maven_exists"]:
-        print(f"INFO: Maven '{MAVEN_BUILD_DIR_NAME}' directory not found at: {maven_dir_path}")
-    if not comparison_results["gradle_exists"]:
-        print(f"INFO: Gradle '{GRADLE_BUILD_DIR_NAME}' directory not found at: {gradle_dir_path}")
-
-    if not comparison_results["maven_exists"] or not comparison_results["gradle_exists"]:
-        print("Cannot compare: one or both build directories are missing.")
-        return comparison_results
-
-    maven_content = get_directory_contents(maven_dir_path, FILES_TO_IGNORE, DIRECTORIES_TO_IGNORE_CONTENT_COMPARISON)
-    gradle_content = get_directory_contents(gradle_dir_path, FILES_TO_IGNORE, DIRECTORIES_TO_IGNORE_CONTENT_COMPARISON)
-
-    # Compare files
-    all_files = set(maven_content["files"].keys()) | set(gradle_content["files"].keys())
-    for f_name in sorted(list(all_files)):
-        maven_hash = maven_content["files"].get(f_name)
-        gradle_hash = gradle_content["files"].get(f_name)
-
-        if maven_hash and gradle_hash:
-            # Special handling for files within dirs where content comparison is skipped
-            if maven_hash == "PRESENT_IN_IGNORED_CONTENT_DIR" and gradle_hash == "PRESENT_IN_IGNORED_CONTENT_DIR":
-                comparison_results["matches"].append(f"{f_name} (Existence checked in ignored content dir)")
-            elif maven_hash == gradle_hash:
-                comparison_results["matches"].append(f_name)
-            else:
-                comparison_results["mismatches"].append(f_name)
-        elif maven_hash:
-            comparison_results["only_in_maven"].append(f_name)
-        elif gradle_hash:
-            comparison_results["only_in_gradle"].append(f_name)
-
-    # Compare directories (existence)
-    common_dirs_set = maven_content["dirs"] & gradle_content["dirs"]
-    comparison_results["common_dirs"] = sorted(list(common_dirs_set))
-    # Directories only in one or the other can also be listed if needed
-    # comparison_results["dirs_only_in_maven"] = sorted(list(maven_content["dirs"] - gradle_content["dirs"]))
-    # comparison_results["dirs_only_in_gradle"] = sorted(list(gradle_content["dirs"] - maven_content["dirs"]))
+def find_project_roots(search_path):
+    """Finds potential Maven or Gradle project roots."""
+    project_roots = []
+    for root, dirs, files in os.walk(search_path):
+        if 'build' in dirs: dirs.remove('build')
+        if 'target' in dirs: dirs.remove('target')
+        if '.git' in dirs: dirs.remove('.git')
+        if 'node_modules' in dirs: dirs.remove('node_modules')
 
 
-    # --- Determine "Overall Match" ---
-    # This is subjective. A simple definition:
-    # - No mismatches in files directly under target/build (unless in ignored content dir).
-    # - Key artifacts (e.g., .jar, .war) exist in both and match (if not in ignored content dir).
-    # - No significant unexpected files only in one or the other (outside ignored content dirs).
-    # You might need to refine this logic based on your specific expectations.
-
-    # For this script, let's say it's an "exact same" if no mismatches and no files exclusively in one or the other
-    # at the top level of build/target, and common critical subdirectories are present.
-    # Files within DIRECTORIES_TO_IGNORE_CONTENT_COMPARISON won't cause a mismatch if they are just present in both.
-
-    is_different = False
-    if comparison_results["mismatches"]:
-        is_different = True
-        print(f"DIFFERENCE: Mismatched files found.")
-    if any(f for f in comparison_results["only_in_maven"] if not maven_content["files"].get(f) == "PRESENT_IN_IGNORED_CONTENT_DIR"):
-        is_different = True
-        print(f"DIFFERENCE: Files found only in '{MAVEN_BUILD_DIR_NAME}'.")
-    if any(f for f in comparison_results["only_in_gradle"] if not gradle_content["files"].get(f) == "PRESENT_IN_IGNORED_CONTENT_DIR"):
-        is_different = True
-        print(f"DIFFERENCE: Files found only in '{GRADLE_BUILD_DIR_NAME}'.")
-
-    # Check if top-level directories differ (ignoring those where content is ignored)
-    maven_top_level_dirs_to_check = maven_content["dirs"] - DIRECTORIES_TO_IGNORE_CONTENT_COMPARISON
-    gradle_top_level_dirs_to_check = gradle_content["dirs"] - DIRECTORIES_TO_IGNORE_CONTENT_COMPARISON
-    if maven_top_level_dirs_to_check != gradle_top_level_dirs_to_check:
-        # is_different = True # This might be too strict, depends on expectations
-        print(f"INFO: Top-level directory structure (excluding ignored content dirs) differs.")
-        print(f"  Maven dirs: {maven_top_level_dirs_to_check}")
-        print(f"  Gradle dirs: {gradle_top_level_dirs_to_check}")
-
-
-    if not is_different:
-        comparison_results["overall_match"] = True
-        print("SAME: Build output directories appear to have comparable content based on the defined checks.")
-    else:
-        comparison_results["overall_match"] = False
-        print("DIFFERENT: Build output directories have notable differences.")
-
-    return comparison_results
-
-def find_projects_and_compare(start_path="."):
-    """
-    Recursively finds projects (Maven or Gradle) and initiates comparison.
-    """
-    all_project_results = []
-    found_projects = set()
-
-    for root, dirs, files in os.walk(start_path):
-        # Skip build directories themselves to avoid re-processing
-        if os.path.basename(root) == MAVEN_BUILD_DIR_NAME or \
-           os.path.basename(root) == GRADLE_BUILD_DIR_NAME or \
-           ".git" in root or ".idea" in root or "node_modules" in root: # Add other common ignores
-            dirs[:] = [] # Don't go deeper into these
-            continue
-
-        project_path = None
-        is_maven = "pom.xml" in files
-        is_gradle = "build.gradle" in files or "build.gradle.kts" in files
+        is_maven = 'pom.xml' in files
+        is_gradle = 'build.gradle' in files or 'build.gradle.kts' in files
 
         if is_maven or is_gradle:
-            project_path = os.path.abspath(root)
-            # Avoid processing sub-modules if parent already processed them as distinct projects
-            # This simple check helps, but for complex multi-modules, might need more sophisticated discovery.
-            is_sub_project = False
-            for found_p in found_projects:
-                if project_path.startswith(found_p + os.sep) and project_path != found_p:
-                    is_sub_project = True
-                    break
-            if is_sub_project:
-                continue
+            project_type = []
+            if is_maven: project_type.append("Maven")
+            if is_gradle: project_type.append("Gradle")
+            project_roots.append({'path': Path(root), 'type': '/'.join(project_type)})
+    return project_roots
 
-            found_projects.add(project_path)
+def determine_overall_status(results, pom_exists, gradle_build_file_exists):
+    """Determines a single overall status string based on comparison results."""
+    # Basic existence checks first
+    if not pom_exists and not gradle_build_file_exists:
+        return "Config Issue: No pom.xml or build.gradle"
+    
+    maven_built = results["maven_target_exists"] == "Yes"
+    gradle_built = results["gradle_build_exists"] == "Yes"
 
-            maven_build_path = os.path.join(project_path, MAVEN_BUILD_DIR_NAME)
-            gradle_build_path = os.path.join(project_path, GRADLE_BUILD_DIR_NAME)
-
-            # Only compare if at least one build system seems to have produced output
-            # Or if both pom.xml and build.gradle exist, indicating a conversion in progress
-            if (is_maven and os.path.exists(maven_build_path)) or \
-               (is_gradle and os.path.exists(gradle_build_path)) or \
-               (is_maven and is_gradle): # If both project files exist, attempt comparison
-                results = compare_build_dirs(project_path, maven_build_path, gradle_build_path)
-                all_project_results.append(results)
+    if pom_exists and not maven_built and gradle_build_file_exists and not gradle_built:
+        return "Not Built (Maven & Gradle)"
+    if pom_exists and not maven_built and not gradle_build_file_exists: # Only Maven project defined, not built
+        return "Maven Output Missing"
+    if gradle_build_file_exists and not gradle_built and not pom_exists: # Only Gradle project defined, not built
+        return "Gradle Output Missing"
+    if pom_exists and not maven_built:
+        return "Maven Output Missing"
+    if gradle_build_file_exists and not gradle_built:
+        return "Gradle Output Missing"
+    
+    # If both are expected to be built and are present
+    if pom_exists and gradle_build_file_exists and maven_built and gradle_built:
+        if (results["artifact_comparison_status"] == "Match" and
+            results["classes_comparison_status"] == "Match" and
+            results["test_reports_status"] == "Match"):
+            return "OK - Match"
+        
+        statuses_indicating_differences = ["Mismatch", "Partial (Size)", "Maven Only", "Gradle Only"]
+        if (results["artifact_comparison_status"] in statuses_indicating_differences or
+            results["classes_comparison_status"] in statuses_indicating_differences or
+            results["test_reports_status"] in statuses_indicating_differences):
+            return "Differences Found"
+        
+        # If statuses are "None Found" for artifacts/classes/tests but builds exist, it's still a difference
+        if (results["artifact_comparison_status"] == "None Found" or
+            results["classes_comparison_status"] == "None Found" or
+            results["test_reports_status"] == "None Found"):
+             # Check if any had content on the other side
+            if (results["artifact_comparison_status"] == "Maven Only" or results["artifact_comparison_status"] == "Gradle Only" or
+                results["classes_comparison_status"] == "Maven Only" or results["classes_comparison_status"] == "Gradle Only" or
+                results["test_reports_status"] == "Maven Only" or results["test_reports_status"] == "Gradle Only"):
+                return "Differences Found (Content Missing)"
             else:
-                print(f"\n--- Skipping Project: {project_path} ---")
-                print(f"Neither '{MAVEN_BUILD_DIR_NAME}' nor '{GRADLE_BUILD_DIR_NAME}' directory found with output, or project type unclear for comparison.")
+                return "Outputs Seem Empty"
 
 
+    return "Check Details" # Fallback for unhandled cases
+
+def compare_outputs(project_path, maven_target_dir, gradle_build_dir):
+    results = {
+        "project_path": str(project_path.name),
+        "full_project_path": str(project_path),
+        "maven_target_exists": "N/A",
+        "gradle_build_exists": "N/A",
+        "artifact_comparison_status": "N/A", "artifact_details": "",
+        "classes_comparison_status": "N/A", "classes_details": "",
+        "test_reports_status": "N/A", "test_reports_details": "",
+        "overall_notes": [],
+        "overall_status": "Pending" # Will be set at the end
+    }
+
+    pom_exists = (project_path / 'pom.xml').exists()
+    gradle_build_file_exists = (project_path / 'build.gradle').exists() or \
+                               (project_path / 'build.gradle.kts').exists()
+
+    results["maven_target_exists"] = "Yes" if maven_target_dir.exists() else "No"
+    results["gradle_build_exists"] = "Yes" if gradle_build_dir.exists() else "No"
+
+    # Initial check if neither build system seems to be configured
+    if not pom_exists and not gradle_build_file_exists:
+        results["overall_status"] = "Config Issue: No pom/gradle"
+        for key in ["artifact_comparison_status", "classes_comparison_status", "test_reports_status"]:
+            results[key] = "No Build Files"
+        return results
+
+    if results["maven_target_exists"] == "No" and results["gradle_build_exists"] == "No":
+        if pom_exists and gradle_build_file_exists: results["overall_notes"].append("Neither 'target' nor 'build' dir found for configured project.")
+        elif pom_exists: results["overall_notes"].append("Maven 'target' dir not found.")
+        elif gradle_build_file_exists: results["overall_notes"].append("Gradle 'build' dir not found.")
+        
+        # Set N/A for all comparisons if both build outputs are missing
+        status_if_unbuilt = "Not Built" if (pom_exists or gradle_build_file_exists) else "No Build Files"
+        for key in ["artifact_comparison_status", "classes_comparison_status", "test_reports_status"]:
+            results[key] = status_if_unbuilt
+        results["overall_status"] = determine_overall_status(results, pom_exists, gradle_build_file_exists)
+        return results
+
+    # --- Artifact Comparison ---
+    # (Logic from previous script, ensure it considers pom_exists and gradle_build_file_exists for relevance)
+    if (maven_target_dir.exists() and pom_exists) or (gradle_build_dir.exists() and gradle_build_file_exists):
+        maven_artifacts = []
+        if maven_target_dir.exists() and pom_exists:
+            maven_artifacts = list(maven_target_dir.glob('*.jar')) + list(maven_target_dir.glob('*.war'))
+        
+        gradle_artifacts = []
+        gradle_libs_dir = gradle_build_dir / 'libs'
+        if gradle_libs_dir.exists() and gradle_build_file_exists:
+            gradle_artifacts = list(gradle_libs_dir.glob('*.jar')) + list(gradle_libs_dir.glob('*.war'))
+
+        maven_artifact_names = sorted([a.name for a in maven_artifacts])
+        gradle_artifact_names = sorted([a.name for a in gradle_artifacts])
+
+        # Both have artifacts or one side is expected to have them
+        if (maven_artifact_names and gradle_artifact_names) or \
+           (maven_artifact_names and pom_exists and not gradle_build_file_exists) or \
+           (gradle_artifact_names and gradle_build_file_exists and not pom_exists) or \
+           (pom_exists and gradle_build_file_exists): # Both configured, compare even if one list is empty
+
+            if maven_artifact_names and gradle_artifact_names:
+                if maven_artifact_names == gradle_artifact_names:
+                    results["artifact_comparison_status"] = "Match"
+                    results["artifact_details"] = f"{len(maven_artifact_names)} artifact(s): {', '.join(maven_artifact_names)}"
+                    # Size check (optional, can be verbose)
+                    size_mismatches = []
+                    for ma_name in maven_artifact_names:
+                        ma = next((a for a in maven_artifacts if a.name == ma_name), None)
+                        ga = next((a for a in gradle_artifacts if a.name == ma_name), None)
+                        if ma and ga and ma.stat().st_size != ga.stat().st_size:
+                            size_mismatches.append(f"{ma_name} (M:{ma.stat().st_size}, G:{ga.stat().st_size})")
+                    if size_mismatches:
+                        results["artifact_comparison_status"] = "Partial (Size)"
+                        results["artifact_details"] += f" -- Size mismatches: {', '.join(size_mismatches)}"
+                else:
+                    results["artifact_comparison_status"] = "Mismatch"
+                    results["artifact_details"] = f"Maven: {maven_artifact_names}. Gradle: {gradle_artifact_names}"
+            elif maven_artifact_names and pom_exists: # Only Maven produced artifacts (and was expected to)
+                results["artifact_comparison_status"] = "Maven Only"
+                results["artifact_details"] = f"Maven: {maven_artifact_names}"
+                if gradle_build_file_exists: results["overall_notes"].append("Gradle produced no primary artifacts.")
+            elif gradle_artifact_names and gradle_build_file_exists: # Only Gradle produced artifacts
+                results["artifact_comparison_status"] = "Gradle Only"
+                results["artifact_details"] = f"Gradle: {gradle_artifact_names}"
+                if pom_exists: results["overall_notes"].append("Maven produced no primary artifacts.")
+            elif pom_exists and gradle_build_file_exists: # Both configured, neither produced artifacts
+                results["artifact_comparison_status"] = "None Found (Both)"
+                results["artifact_details"] = "No primary artifacts in expected locations for either."
+            elif pom_exists: # Only maven configured, no artifacts
+                results["artifact_comparison_status"] = "None Found (Maven)"
+            elif gradle_build_file_exists: # Only gradle configured, no artifacts
+                 results["artifact_comparison_status"] = "None Found (Gradle)"
+
+        else: # Cases where one side might not be configured, so "None Found" might be expected for that side
+            if pom_exists and not maven_artifacts: results["artifact_comparison_status"] = "None Found (Maven)"
+            elif gradle_build_file_exists and not gradle_artifacts: results["artifact_comparison_status"] = "None Found (Gradle)"
+            else: results["artifact_comparison_status"] = "N/A"
+
+    else: # No relevant output dirs or build files for this comparison
+        if pom_exists or gradle_build_file_exists: results["artifact_comparison_status"] = "Not Built"
+        else: results["artifact_comparison_status"] = "No Build Files"
+    
+    # --- Compiled Classes Comparison --- (Similar refined logic)
+    if (maven_target_dir.exists() and pom_exists) or (gradle_build_dir.exists() and gradle_build_file_exists):
+        maven_classes_dir = maven_target_dir / 'classes'
+        gradle_class_locs = ['java/main', 'kotlin/main', 'scala/main', 'groovy/main']
+        gradle_classes_dirs_to_check = [gradle_build_dir / 'classes' / loc for loc in gradle_class_locs if (gradle_build_dir / 'classes' / loc).exists()]
+
+        maven_classes_exist_and_relevant = maven_classes_dir.exists() and pom_exists
+        gradle_classes_exist_and_relevant = bool(gradle_classes_dirs_to_check) and gradle_build_file_exists
+
+        if maven_classes_exist_and_relevant and gradle_classes_exist_and_relevant:
+            maven_class_files = set(p.relative_to(maven_classes_dir) for p in maven_classes_dir.rglob('*.class'))
+            gradle_class_files_combined = set()
+            for gcd in gradle_classes_dirs_to_check:
+                 gradle_class_files_combined.update(p.relative_to(gcd) for p in gcd.rglob('*.class'))
+
+            if maven_class_files == gradle_class_files_combined:
+                results["classes_comparison_status"] = "Match"
+                results["classes_details"] = f"{len(maven_class_files)} .class files"
+            else:
+                results["classes_comparison_status"] = "Mismatch"
+                m_only_count = len(maven_class_files - gradle_class_files_combined)
+                g_only_count = len(gradle_class_files_combined - maven_class_files)
+                results["classes_details"] = (f"M-total: {len(maven_class_files)}, G-total: {len(gradle_class_files_combined)}. "
+                                              f"M-only: {m_only_count}, G-only: {g_only_count}.")
+        elif maven_classes_exist_and_relevant:
+            results["classes_comparison_status"] = "Maven Only"
+            results["classes_details"] = f"{len(list(maven_classes_dir.rglob('*.class')))} .class files"
+        elif gradle_classes_exist_and_relevant:
+            results["classes_comparison_status"] = "Gradle Only"
+            total_gradle_classes = sum(len(list(gcd.rglob('*.class'))) for gcd in gradle_classes_dirs_to_check)
+            results["classes_details"] = f"{total_gradle_classes} .class files"
+        elif pom_exists and gradle_build_file_exists : # Both configured but no classes
+            results["classes_comparison_status"] = "None Found (Both)"
+        elif pom_exists: results["classes_comparison_status"] = "None Found (Maven)"
+        elif gradle_build_file_exists: results["classes_comparison_status"] = "None Found (Gradle)"
+        else: results["classes_comparison_status"] = "N/A"
+
+    else:
+        if pom_exists or gradle_build_file_exists: results["classes_comparison_status"] = "Not Built"
+        else: results["classes_comparison_status"] = "No Build Files"
+
+    # --- Test Reports Comparison --- (Similar refined logic)
+    if (maven_target_dir.exists() and pom_exists) or (gradle_build_dir.exists() and gradle_build_file_exists):
+        maven_test_reports_dir = maven_target_dir / 'surefire-reports'
+        gradle_test_reports_dir = gradle_build_dir / 'reports' / 'tests' / 'test'
+
+        maven_reports_exist_and_relevant = maven_test_reports_dir.exists() and pom_exists
+        gradle_reports_exist_and_relevant = gradle_test_reports_dir.exists() and gradle_build_file_exists
+
+        if maven_reports_exist_and_relevant and gradle_reports_exist_and_relevant:
+            maven_test_xml_count = len(list(maven_test_reports_dir.glob('TEST-*.xml')))
+            gradle_test_xml_count = len(list(gradle_test_reports_dir.glob('TEST-*.xml')))
+            if maven_test_xml_count == gradle_test_xml_count and maven_test_xml_count > 0:
+                results["test_reports_status"] = "Match"
+                results["test_reports_details"] = f"{maven_test_xml_count} XML reports"
+            elif maven_test_xml_count > 0 or gradle_test_xml_count > 0 :
+                results["test_reports_status"] = "Mismatch"
+                results["test_reports_details"] = f"Maven XMLs: {maven_test_xml_count}, Gradle XMLs: {gradle_test_xml_count}"
+            else:
+                results["test_reports_status"] = "None Found (Both)"
+                results["test_reports_details"] = "No XML reports in expected locations."
+        elif maven_reports_exist_and_relevant:
+            results["test_reports_status"] = "Maven Only"
+            results["test_reports_details"] = f"{len(list(maven_test_reports_dir.glob('TEST-*.xml')))} XML reports"
+        elif gradle_reports_exist_and_relevant:
+            results["test_reports_status"] = "Gradle Only"
+            results["test_reports_details"] = f"{len(list(gradle_test_reports_dir.glob('TEST-*.xml')))} XML reports"
+        elif pom_exists and gradle_build_file_exists:
+            results["test_reports_status"] = "None Found (Both)"
+        elif pom_exists: results["test_reports_status"] = "None Found (Maven)"
+        elif gradle_build_file_exists: results["test_reports_status"] = "None Found (Gradle)"
+        else: results["test_reports_status"] = "N/A"
+    else:
+        if pom_exists or gradle_build_file_exists: results["test_reports_status"] = "Not Built"
+        else: results["test_reports_status"] = "No Build Files"
+
+    results["overall_status"] = determine_overall_status(results, pom_exists, gradle_build_file_exists)
+    return results
+
+
+def format_results_as_table_for_file(all_project_results):
+    """Formats the collected results into a string table for file output, with dynamic column widths."""
     if not all_project_results:
-        print("\nNo projects found or no build directories to compare.")
+        return "No project data to display."
+
+    headers = ["Project", "Full Path", "M Target", "G Build", "Artifacts", "Art. Details", "Classes", "Cls. Details", "Tests", "Test Details", "Overall Status", "Notes"]
+    
+    # Data mapping from result keys to header names
+    field_map = {
+        "Project": "project_path",
+        "Full Path": "full_project_path",
+        "M Target": "maven_target_exists",
+        "G Build": "gradle_build_exists",
+        "Artifacts": "artifact_comparison_status",
+        "Art. Details": "artifact_details",
+        "Classes": "classes_comparison_status",
+        "Cls. Details": "classes_details",
+        "Tests": "test_reports_status",
+        "Test Details": "test_reports_details",
+        "Overall Status": "overall_status",
+        "Notes": lambda r: ", ".join(r.get("overall_notes", []))
+    }
+
+    # Prepare data for width calculation and final output
+    table_data_rows = []
+    for res_dict in all_project_results:
+        row_data = {}
+        for header_name in headers:
+            data_key_or_func = field_map.get(header_name)
+            raw_data_val = ""
+            if callable(data_key_or_func):
+                raw_data_val = data_key_or_func(res_dict)
+            elif isinstance(data_key_or_func, str):
+                raw_data_val = str(res_dict.get(data_key_or_func, "N/A"))
+            row_data[header_name] = raw_data_val
+        table_data_rows.append(row_data)
+
+    # Calculate dynamic column widths
+    col_widths = {header: len(header) for header in headers} # Initialize with header lengths
+    for row_dict in table_data_rows:
+        for header_name in headers:
+            col_widths[header_name] = max(col_widths[header_name], len(str(row_dict.get(header_name, ""))))
+    
+    # Add padding
+    padding = 2
+    for header_name in col_widths:
+        col_widths[header_name] += padding
+
+    # Create header row string
+    header_row_list = [f"{h:<{col_widths[h]}}" for h in headers]
+    header_row_str = " | ".join(header_row_list)
+    separator_row_str = "-+-".join("-" * col_widths[h] for h in headers)
+
+    # Create data rows string
+    data_rows_str_list = []
+    for row_dict in table_data_rows:
+        row_cells = [f"{str(row_dict.get(h, '')):<{col_widths[h]}}" for h in headers]
+        data_rows_str_list.append(" | ".join(row_cells))
+
+    return header_row_str + "\n" + separator_row_str + "\n" + "\n".join(data_rows_str_list)
+
+
+def main():
+    base_search_path_str = input("Enter the root path to search for projects (or a single project path): ")
+    if not os.path.isdir(base_search_path_str):
+        print(f"Error: Path '{base_search_path_str}' is not a valid directory.")
         return
 
-    # CLI Summary
-    print("\n\n--- Overall Summary ---")
-    for res in all_project_results:
-        status = "SAME" if res["overall_match"] else "DIFFERENT"
-        if not res["maven_exists"] and not res["gradle_exists"]:
-            status = "MISSING_BUILD_DIRS"
-        elif not res["maven_exists"]:
-            status = "MISSING_MAVEN_TARGET"
-        elif not res["gradle_exists"]:
-            status = "MISSING_GRADLE_BUILD"
-        print(f"Project: {os.path.basename(res['project_path'])} ({res['project_path']}) - Status: {status}")
+    base_search_path = Path(base_search_path_str)
+    all_results_data = []
 
-    # Detailed Report Prompt
-    while True:
-        detailed_report_choice = input("\nDo you want a detailed report in a text file? (yes/no): ").strip().lower()
-        if detailed_report_choice in ["yes", "y"]:
-            generate_detailed_report(all_project_results)
-            break
-        elif detailed_report_choice in ["no", "n"]:
-            print("Skipping detailed report.")
-            break
-        else:
-            print("Invalid choice. Please enter 'yes' or 'no'.")
+    print(f"\nAnalyzing project(s) at/under: {base_search_path}")
+    print("Important: Ensure projects have been built with BOTH Maven (e.g., 'mvn clean package')")
+    print("and Gradle (e.g., './gradlew clean build') for meaningful comparison.")
 
+    projects_to_analyze = []
+    is_maven_at_root = (base_search_path / 'pom.xml').exists()
+    is_gradle_at_root = (base_search_path / 'build.gradle').exists() or \
+                        (base_search_path / 'build.gradle.kts').exists()
 
-def generate_detailed_report(all_results):
-    """
-    Generates a detailed comparison report in a text file.
-    """
-    timestamp = وقت.strftime("%Y%m%d-%H%M%S")
-    report_filename = f"maven_gradle_comparison_report_{timestamp}.txt"
+    if is_maven_at_root or is_gradle_at_root:
+        projects_to_analyze.append({'path': base_search_path, 'type': 'root', 'name': base_search_path.name})
 
-    with open(report_filename, "w", encoding="utf-8") as f:
-        f.write(f"Maven vs. Gradle Build Output Comparison Report\n")
-        f.write(f"Generated: {وقت.asctime()}\n")
-        f.write(f"Compared '{MAVEN_BUILD_DIR_NAME}' vs. '{GRADLE_BUILD_DIR_NAME}'\n")
-        f.write("=" * 80 + "\n")
-
-        for res in all_results:
-            f.write(f"\nProject Path: {res['project_path']}\n")
-            f.write("-" * 60 + "\n")
-
-            if not res["maven_exists"] and not res["gradle_exists"]:
-                f.write("  Status: Neither Maven target nor Gradle build directory found.\n")
-                continue
-            elif not res["maven_exists"]:
-                f.write(f"  Status: Maven '{MAVEN_BUILD_DIR_NAME}' directory NOT FOUND at {res['maven_dir']}\n")
-                f.write(f"  Gradle '{GRADLE_BUILD_DIR_NAME}' directory FOUND at {res['gradle_dir']}\n")
-                if res.get("only_in_gradle"):
-                    f.write(f"  Files only in Gradle '{GRADLE_BUILD_DIR_NAME}':\n")
-                    for item in res["only_in_gradle"]:
-                        f.write(f"    - {item}\n")
-                continue
-            elif not res["gradle_exists"]:
-                f.write(f"  Status: Gradle '{GRADLE_BUILD_DIR_NAME}' directory NOT FOUND at {res['gradle_dir']}\n")
-                f.write(f"  Maven '{MAVEN_BUILD_DIR_NAME}' directory FOUND at {res['maven_dir']}\n")
-                if res.get("only_in_maven"):
-                    f.write(f"  Files only in Maven '{MAVEN_BUILD_DIR_NAME}':\n")
-                    for item in res["only_in_maven"]:
-                        f.write(f"    - {item}\n")
-                continue
-
-            overall_status = "SAME (Comparable)" if res["overall_match"] else "DIFFERENT"
-            f.write(f"  Overall Comparison Status: {overall_status}\n\n")
-
-            f.write(f"  Maven Dir ('{MAVEN_BUILD_DIR_NAME}'): {res['maven_dir']}\n")
-            f.write(f"  Gradle Dir ('{GRADLE_BUILD_DIR_NAME}'): {res['gradle_dir']}\n\n")
-
-            sections = {
-                "Matching Files/Items (Name & Content or Ignored Content Dir Presence)": res["matches"],
-                "Mismatched Files (Same Name, Different Content - SHA256 differs)": res["mismatches"],
-                f"Items Only in Maven '{MAVEN_BUILD_DIR_NAME}'": res["only_in_maven"],
-                f"Items Only in Gradle '{GRADLE_BUILD_DIR_NAME}'": res["only_in_gradle"],
-                "Common Top-Level Subdirectories (Existence Checked)": res["common_dirs"]
-            }
-
-            for title, items in sections.items():
-                if items:
-                    f.write(f"  {title}:\n")
-                    if not items:
-                        f.write("    - None\n")
-                    for item in items:
-                        f.write(f"    - {item}\n")
-                    f.write("\n")
-            f.write("-" * 60 + "\n")
-
-    print(f"\nDetailed report generated: {report_filename}")
+    scan_recursively_input = input("Scan recursively for projects within subdirectories? (y/n): ").strip().lower()
+    if scan_recursively_input == 'y':
+        print(f"\nScanning recursively under '{base_search_path}'...")
+        discovered_projects = find_project_roots(base_search_path)
+        for dp_info in discovered_projects:
+            # Add if not already added as root, or if it's a distinct module
+            if dp_info['path'] != base_search_path or not (is_maven_at_root or is_gradle_at_root) :
+                 projects_to_analyze.append({'path': dp_info['path'], 'type': dp_info['type'], 'name': dp_info['path'].name})
+        # Remove duplicates if any (e.g. root was also found by recursive scan)
+        unique_projects = []
+        seen_paths = set()
+        for p in projects_to_analyze:
+            if p['path'] not in seen_paths:
+                unique_projects.append(p)
+                seen_paths.add(p['path'])
+        projects_to_analyze = unique_projects
 
 
-if __name__ == "__main__":
-    current_directory = os.getcwd()
-    print(f"Starting comparison from current directory: {current_directory}")
-    print(f"Will compare contents of '{MAVEN_BUILD_DIR_NAME}/' with '{GRADLE_BUILD_DIR_NAME}/' in found projects.")
-    print(f"Ignoring files: {FILES_TO_IGNORE}")
-    print(f"Skipping content hash comparison for subdirectories named: {DIRECTORIES_TO_IGNORE_CONTENT_COMPARISON} (will check file presence)\n")
-    find_projects_and_compare(current_directory)
+    if not projects_to_analyze:
+        print(f"No Maven or Gradle projects found to analyze at or under '{base_search_path}'.")
+        return
+    
+    print(f"\n--- Processing {len(projects_to_analyze)} project(s) ---")
+    for proj_info in projects_to_analyze:
+        proj_path = proj_info['path']
+        proj_name = proj_info.get('name', proj_path.name) # Use name if available
+
+        maven_target_dir = proj_path / 'target'
+        gradle_build_dir = proj_path / 'build'
+        
+        comparison_data = compare_outputs(proj_path, maven_target_dir, gradle_build_dir)
+        all_results_data.append(comparison_data)
+        
+        # Print concise status to terminal during processing
+        print(f"Module: {proj_name:<40} | Status: {comparison_data['overall_status']}")
+
+    if not all_results_data:
+        print("\nNo project data was collected to generate a summary.")
+        return
+
+    # --- Output to text file (verbose table) ---
+    save_to_file = input("\nSave full comparison details to a text file? (y/n): ").strip().lower()
+    if save_to_file == 'y':
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_filename = f"build_comparison_summary_{timestamp}.txt"
+        output_filename = input(f"Enter filename (default: {default_filename}): ").strip()
+        if not output_filename: output_filename = default_filename
+        
+        try:
+            with open(output_filename, 'w', encoding='utf-8') as f:
+                f.write(f"Build Comparison Full Summary - Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Searched Path: {base_search_path_str}\n\n")
+                verbose_summary_table_str = format_results_as_table_for_file(all_results_data)
+                f.write(verbose_summary_table_str)
+            print(f"Full summary saved to '{output_filename}'")
+        except IOError as e:
+            print(f"Error saving file: {e}")
+    else:
+        print("Report not saved to file.")
+
+if __name__ == '__main__':
+    main()
