@@ -33,7 +33,7 @@ def find_project_roots(search_path):
             continue
 
         dirs[:] = [d for d in dirs if d not in ['.git', '.svn', '.hg', 'node_modules', 'target', 'build', '__pycache__', '.venv', 'venv', 'dist', 'out', '.idea', '.vscode']]
-        
+
         has_pom = 'pom.xml' in files
         has_gradle = 'build.gradle.kts' in files or 'build.gradle' in files
 
@@ -43,13 +43,13 @@ def find_project_roots(search_path):
             handled_paths.add(current_path)
         elif (has_pom or has_gradle):
             is_root_or_direct_relevant_child = (
-                current_path == abs_search_path or 
+                current_path == abs_search_path or
                 current_path.parent == abs_search_path or
                 any(current_path.parent == p['path'] for p in project_roots_to_analyze if p['path'] != current_path)
             )
             if is_root_or_direct_relevant_child:
                  print(f"Skipping: {current_path.name} (at {current_path}) - requires both pom.xml and build.gradle[.kts].")
-            handled_paths.add(current_path) 
+            handled_paths.add(current_path)
     return project_roots_to_analyze
 
 def compare_archive_contents(maven_archive_path, gradle_archive_path):
@@ -61,7 +61,8 @@ def compare_archive_contents(maven_archive_path, gradle_archive_path):
         "gradle_ignored_metadata_files": set(), # Ignored metadata found in Gradle JAR
         "error": None,
         "maven_core_files_count": 0, "gradle_core_files_count": 0,
-        "maven_ignored_metadata_count": 0, "gradle_ignored_metadata_count": 0
+        "maven_ignored_metadata_count": 0, "gradle_ignored_metadata_count": 0,
+        "maven_core_files": set(), "gradle_core_files": set() # Ensure these are initialized
     }
     try:
         with zipfile.ZipFile(maven_archive_path, 'r') as maven_zip, \
@@ -87,7 +88,7 @@ def compare_archive_contents(maven_archive_path, gradle_archive_path):
                 comparison["core_match"] = False
                 comparison["maven_only_core_files"] = comparison["maven_core_files"] - comparison["gradle_core_files"]
                 comparison["gradle_only_core_files"] = comparison["gradle_core_files"] - comparison["maven_core_files"]
-            
+
     except FileNotFoundError as e:
         comparison["error"] = f"Archive not found: {e.filename}"
     except zipfile.BadZipFile:
@@ -106,33 +107,33 @@ def determine_overall_status(results):
 
     is_ok_core = True
     if results["artifact_comparison_status"] != "Match (Core Content)":
-        if results["artifact_comparison_status"] in ["Core Content Mismatch", "Structure Mismatch (Names)", 
+        if results["artifact_comparison_status"] in ["Core Content Mismatch", "Structure Mismatch (Names)",
                                                    "Maven Only", "Gradle Only"] or \
            results["artifact_comparison_status"].startswith("Error Comparing Content"):
             is_ok_core = False
-    
+
     if results["classes_comparison_status"] != "Match":
         if results["classes_comparison_status"] not in ["N/A", "Not Built", "None Found (Both)"]:
             is_ok_core = False
-            
+
     if results["test_reports_status"] != "Match":
         if results["test_reports_status"] not in ["N/A", "Not Built", "None Found (Both)"]:
             is_ok_core = False
 
     if is_ok_core:
         gradle_has_unexpected_ignored_metadata = any(
-            "Gradle artifact" in note and "contains ignored metadata files" in note # Updated note check
+            "Gradle artifact" in note and "contains ignored metadata files" in note
             for note in results.get("overall_notes", [])
         )
         if gradle_has_unexpected_ignored_metadata:
-            return "OK - Match (Gradle Has Ignored Meta)" 
+            return "OK - Match (Gradle Has Ignored Meta)"
         return "OK - Match"
 
     if (results["artifact_comparison_status"] == "None Found (Both)" and
         results["classes_comparison_status"] == "None Found (Both)" and
         results["test_reports_status"] == "None Found (Both)"):
         return "Outputs Empty (Both)"
-        
+
     return "Differences Found"
 
 def compare_outputs(project_path, maven_target_dir, gradle_build_dir):
@@ -166,7 +167,7 @@ def compare_outputs(project_path, maven_target_dir, gradle_build_dir):
         elif not maven_artifacts_paths and gradle_artifacts_paths : results["artifact_comparison_status"] = "Gradle Only"
         elif maven_artifacts_paths and not gradle_artifacts_paths: results["artifact_comparison_status"] = "Maven Only"
         elif maven_artifact_names == gradle_artifact_names:
-            results["artifact_comparison_status"] = "Match (Names)" 
+            results["artifact_comparison_status"] = "Match (Names)"
             all_archives_core_content_matched = True
             any_gradle_produced_ignored_metadata = False
 
@@ -175,13 +176,13 @@ def compare_outputs(project_path, maven_target_dir, gradle_build_dir):
                 content_comp_summary = {
                     "archive_name": m_path.name, "content_core_match": content_comp["core_match"],
                     "error": content_comp["error"],
-                    "maven_core_files_count": content_comp["maven_core_files_count"], 
+                    "maven_core_files_count": content_comp["maven_core_files_count"],
                     "gradle_core_files_count": content_comp["gradle_core_files_count"],
                     "maven_only_core_files": sorted(list(content_comp["maven_only_core_files"])),
                     "gradle_only_core_files": sorted(list(content_comp["gradle_only_core_files"])),
-                    "maven_ignored_metadata_count": content_comp["maven_ignored_metadata_count"], 
+                    "maven_ignored_metadata_count": content_comp["maven_ignored_metadata_count"],
                     "gradle_ignored_metadata_count": content_comp["gradle_ignored_metadata_count"],
-                    "gradle_ignored_metadata_files": sorted(list(content_comp["gradle_ignored_metadata_files"])) 
+                    "gradle_ignored_metadata_files": sorted(list(content_comp["gradle_ignored_metadata_files"]))
                 }
                 results["artifacts_content_comparison"].append(content_comp_summary)
 
@@ -189,24 +190,24 @@ def compare_outputs(project_path, maven_target_dir, gradle_build_dir):
                     results["artifact_comparison_status"] = f"Error Comparing Content ({m_path.name})"
                     all_archives_core_content_matched = False
                     results["overall_notes"].append(f"Artifact Error ({m_path.name}): {content_comp['error']}")
-                    break 
+                    break
                 if not content_comp["core_match"]: all_archives_core_content_matched = False
                 if content_comp["gradle_ignored_metadata_count"] > 0: any_gradle_produced_ignored_metadata = True
-            
+
             if "Error Comparing Content" not in results["artifact_comparison_status"]:
                 if all_archives_core_content_matched:
                     results["artifact_comparison_status"] = "Match (Core Content)"
                 else:
                     results["artifact_comparison_status"] = "Core Content Mismatch"
-            
+
             if any_gradle_produced_ignored_metadata:
                  results["overall_notes"].append(f"Note: Gradle artifact(s) contain ignored metadata files (e.g., in META-INF/maven/ or META-INF/jpms.args). Review if intended.")
         else: results["artifact_comparison_status"] = "Structure Mismatch (Names)"
     else: results["artifact_comparison_status"] = "Not Built"
 
-    # --- Compiled Classes & Test Reports (condensed for brevity) ---
+    # --- Compiled Classes (condensed for brevity, same as original) ---
     maven_classes_dir = maven_target_dir / 'classes'
-    gradle_class_locs = ['java/main', 'kotlin/main', 'scala/main', 'groovy/main'] 
+    gradle_class_locs = ['java/main', 'kotlin/main', 'scala/main', 'groovy/main']
     gradle_classes_dirs_to_check = [gradle_build_dir / 'classes' / loc for loc in gradle_class_locs if (gradle_build_dir / 'classes' / loc).exists()]
     maven_classes_exist = maven_classes_dir.exists() and results["maven_target_exists"] == "Yes"
     gradle_classes_exist = bool(gradle_classes_dirs_to_check) and results["gradle_build_exists"] == "Yes"
@@ -221,18 +222,36 @@ def compare_outputs(project_path, maven_target_dir, gradle_build_dir):
     elif results["maven_target_exists"] == "Yes" and results["gradle_build_exists"] == "Yes": results["classes_comparison_status"] = "None Found (Both)"
     else: results["classes_comparison_status"] = "Not Built"
 
-    maven_test_reports_dir, gradle_test_reports_dir = maven_target_dir / 'surefire-reports', gradle_build_dir / 'reports' / 'tests' / 'test'
-    maven_reports_exist, gradle_reports_exist = maven_test_reports_dir.exists() and results["maven_target_exists"]=="Yes", gradle_test_reports_dir.exists() and results["gradle_build_exists"]=="Yes"
-    if maven_reports_exist and gradle_reports_exist:
-        m_xml,g_xml = len(list(maven_test_reports_dir.glob('TEST-*.xml'))), len(list(gradle_test_reports_dir.glob('TEST-*.xml')))
-        if m_xml == g_xml and m_xml > 0: results["test_reports_status"], results["test_reports_details"] = "Match", f"{m_xml} XML report(s)"
-        elif m_xml > 0 or g_xml > 0: results["test_reports_status"], results["test_reports_details"] = "Mismatch", f"Maven XMLs: {m_xml}, Gradle XMLs: {g_xml}"
-        else: results["test_reports_status"], results["test_reports_details"] = "None Found (Both)", "No XML reports."
-    elif maven_reports_exist: results["test_reports_status"], results["test_reports_details"] = "Maven Only", f"{len(list(maven_test_reports_dir.glob('TEST-*.xml')))} XML report(s)"
-    elif gradle_reports_exist: results["test_reports_status"], results["test_reports_details"] = "Gradle Only", f"{len(list(gradle_test_reports_dir.glob('TEST-*.xml')))} XML report(s)"
-    elif results["maven_target_exists"] == "Yes" and results["gradle_build_exists"] == "Yes": results["test_reports_status"] = "None Found (Both)"
-    else: results["test_reports_status"] = "Not Built"
-    
+    # --- Test Reports ---
+    maven_test_reports_dir = maven_target_dir / 'surefire-reports'
+    # Corrected path for Gradle XML test reports
+    gradle_xml_test_reports_dir = gradle_build_dir / 'test-results' / 'test'
+
+    maven_reports_exist = maven_test_reports_dir.exists() and results["maven_target_exists"] == "Yes"
+    # Check existence of the correct Gradle XML reports directory
+    gradle_xml_reports_exist = gradle_xml_test_reports_dir.exists() and results["gradle_build_exists"] == "Yes"
+
+    if maven_reports_exist and gradle_xml_reports_exist:
+        m_xml = len(list(maven_test_reports_dir.glob('TEST-*.xml')))
+        # Count XML files in the correct Gradle XML reports directory
+        g_xml = len(list(gradle_xml_test_reports_dir.glob('TEST-*.xml')))
+
+        if m_xml == g_xml and m_xml > 0:
+            results["test_reports_status"], results["test_reports_details"] = "Match", f"{m_xml} XML report(s)"
+        elif m_xml > 0 or g_xml > 0:
+            results["test_reports_status"], results["test_reports_details"] = "Mismatch", f"Maven XMLs: {m_xml}, Gradle XMLs: {g_xml}"
+        else:
+            results["test_reports_status"], results["test_reports_details"] = "None Found (Both)", "No XML reports."
+    elif maven_reports_exist:
+        results["test_reports_status"], results["test_reports_details"] = "Maven Only", f"{len(list(maven_test_reports_dir.glob('TEST-*.xml')))} XML report(s)"
+    elif gradle_xml_reports_exist: # Check the correct Gradle XML reports directory
+        # Count XML files in the correct Gradle XML reports directory
+        results["test_reports_status"], results["test_reports_details"] = "Gradle Only", f"{len(list(gradle_xml_test_reports_dir.glob('TEST-*.xml')))} XML report(s)"
+    elif results["maven_target_exists"] == "Yes" and results["gradle_build_exists"] == "Yes":
+        results["test_reports_status"] = "None Found (Both)"
+    else:
+        results["test_reports_status"] = "Not Built"
+
     results["overall_status"] = determine_overall_status(results)
     return results
 
@@ -243,7 +262,7 @@ def generate_summary_table_for_file(all_project_results):
     for res in all_project_results:
         table_data_rows.append({
             "Project": res.get("project_path", "N/A"), "Overall Status": res.get("overall_status", "N/A"),
-            "Artifacts (Core)": res.get("artifact_comparison_status", "N/A"), 
+            "Artifacts (Core)": res.get("artifact_comparison_status", "N/A"),
             "Classes": res.get("classes_comparison_status", "N/A"), "Tests": res.get("test_reports_status", "N/A")
         })
     col_widths = {h: len(h) for h in headers}
@@ -286,23 +305,16 @@ def generate_detailed_sections_for_file(all_project_results):
                         report_lines.append("        CORE files found in Gradle archive ONLY (unexpectedly):")
                         for f in content_comp["gradle_only_core_files"][:15]: report_lines.append(f"          - {f}")
                         if len(content_comp["gradle_only_core_files"]) > 15: report_lines.append(f"          ... and {len(content_comp['gradle_only_core_files']) - 15} more.")
-                
-                # Ignored Metadata (like META-INF/maven/ or META-INF/jpms.args) specific reporting
-                # Only report if Gradle *unexpectedly* produces these.
-                # Their presence in Maven and absence in Gradle is considered normal/expected.
+
                 if content_comp['gradle_ignored_metadata_count'] > 0:
                     report_lines.append(f"      (WARNING) Gradle archive unexpectedly contained {content_comp['gradle_ignored_metadata_count']} ignored metadata file(s) (e.g., in META-INF/maven/, META-INF/jpms.args):")
-                    # List the actual ignored metadata files found in Gradle's archive
-                    for f in content_comp.get("gradle_ignored_metadata_files", [])[:10]: 
+                    for f in content_comp.get("gradle_ignored_metadata_files", [])[:10]:
                         report_lines.append(f"        - {f}")
-                    if len(content_comp.get("gradle_ignored_metadata_files", [])) > 10: 
+                    if len(content_comp.get("gradle_ignored_metadata_files", [])) > 10:
                         report_lines.append(f"        ... and {len(content_comp.get('gradle_ignored_metadata_files', [])) - 10} more.")
                     report_lines.append(f"        (For context, Maven archive contained {content_comp['maven_ignored_metadata_count']} such metadata file(s)).")
                 elif content_comp['maven_ignored_metadata_count'] > 0 and content_comp['gradle_ignored_metadata_count'] == 0:
-                    # This is the expected 'good' state - Maven had metadata, Gradle correctly did not.
-                    # No explicit message needed here to reduce noise, unless verbose debugging is on.
-                    # report_lines.append(f"      (Info) Gradle archive correctly contained 0 ignored metadata files (Maven had {content_comp['maven_ignored_metadata_count']}).")
-                    pass 
+                    pass
         report_lines.append("")
 
         report_lines.extend([
@@ -325,7 +337,7 @@ def main():
 
     base_search_path_resolved = Path(base_search_path_str).resolve()
     all_results_data = []
-    
+
     print(f"\nAnalyzing projects under: {base_search_path_resolved}")
     print("Will only process modules containing BOTH 'pom.xml' and 'build.gradle[.kts]'.")
     print("Important: Ensure relevant projects have been built with BOTH Maven and Gradle for comparison.")
