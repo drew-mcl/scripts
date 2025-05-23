@@ -382,3 +382,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
+for j := i+1; j < len(nums); j++
