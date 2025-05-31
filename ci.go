@@ -174,41 +174,48 @@ func findChangedModules(changedFiles []string, projects map[string]Project, depl
 }
 
 // findAffectedApps traverses the reverse dependency graph to find all upstream applications that are affected.
-func findAffectedApps(initialModules, reverseGraph map[string][]string, deployableApps map[string]bool) []string {
+// findAffectedApps traverses the reverse dependency graph to find all upstream applications that are affected.
+func findAffectedApps(initialModules map[string]bool, reverseGraph map[string][]string, deployableApps map[string]bool) []string {
+	// The set of all modules we determine are affected.
 	affectedSet := make(map[string]bool)
+	// The queue for our breadth-first search through the dependency graph.
 	queue := make([]string, 0, len(initialModules))
 
+	// **THIS IS THE CORRECTED PART**
+	// We iterate over the keys of the initialModules map to populate our queue.
 	for module := range initialModules {
 		queue = append(queue, module)
 	}
 
 	for len(queue) > 0 {
+		// Dequeue the next module to process.
 		currentModule := queue[0]
 		queue = queue[1:]
 
 		if affectedSet[currentModule] {
-			continue // Already processed
+			continue // Already processed, skip.
 		}
+
+		// Mark this module as affected and log our progress.
 		affectedSet[currentModule] = true
 		logger.Debug("traversing dependency", "module", currentModule)
 
-		// Find everything that depends on the current module and add it to the queue
-		dependents := reverseGraph[currentModule]
-		if len(dependents) > 0 {
+		// Find everything that depends on the current module...
+		if dependents, ok := reverseGraph[currentModule]; ok {
 			logger.Debug("found dependents", "module", currentModule, "dependents", dependents)
+			// ...and add them to the queue to be processed.
 			queue = append(queue, dependents...)
 		}
 	}
 
-	// Filter the final set to only include actual deployable applications
+	// Filter the final set to only include actual deployable applications.
 	finalApps := make([]string, 0)
 	for app := range affectedSet {
 		if deployableApps[app] {
 			finalApps = append(finalApps, app)
 		}
 	}
-	// Sort for consistent output, which is good practice
-	// sort.Strings(finalApps)
+
 	return finalApps
 }
 
