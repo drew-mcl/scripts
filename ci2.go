@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """pipeline_generator.py
 
-Re-implementation of the Go pipeline generator in idiomatic, dependency-free Python 3.11.
+Re‑implementation of the Go pipeline generator in idiomatic, dependency‑free Python 3.11.
 It reads a Gradle dependency graph (exported as JSON), analyses which deployable
 applications inside *apps/* are affected by a set of changed files, and prints
-GitLab-CI YAML that triggers the downstream pipelines for those apps.
+GitLab‑CI YAML that triggers the downstream pipelines for those apps.
 
 **Gradle layout assumptions**
   • Every deployable app lives in *apps/<appDir>*
@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Dict, List, Set
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Structured JSON logging (slog-like)
+# Structured JSON logging (slog‑like)
 # ──────────────────────────────────────────────────────────────────────────────
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401
@@ -156,8 +156,8 @@ def generate_pipeline_yaml(affected_apps: List[str]) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Generate GitLab downstream-pipeline YAML from changed files and Gradle graph.")
-    p.add_argument("changed_files", nargs=argparse.REMAINDER, help="Changed files (space-separated or list)")
+    p = argparse.ArgumentParser(description="Generate GitLab downstream‑pipeline YAML from changed files and Gradle graph.")
+    p.add_argument("changed_files", nargs=argparse.REMAINDER, help="Changed files (space‑separated or list)")
     p.add_argument("--graph-file", type=Path, default=Path("build/dependency-graph.json"), help="Path to dependency graph JSON")
     p.add_argument("--apps-dir", type=Path, default=Path("apps"), help="Directory containing deployable apps")
     return p.parse_args(argv)
