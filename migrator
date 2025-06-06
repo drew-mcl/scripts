@@ -1,0 +1,289 @@
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io/ioutil"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+)
+
+type BitbucketRepo struct {
+	Slug          string `json:"slug"`
+	Public        bool   `json:"public"`
+	ScmID         string `json:"scmId"`
+	Name          string `json:"name"`
+	Last          int64  `json:"last"`
+	Links         Links  `json:"links"`
+	DefaultBranch string `json:"defaultBranch"`
+}
+
+type Links struct {
+	Self []struct {
+		Href string `json:"href"`
+	} `json:"self"`
+}
+
+type GitLabRepo struct {
+	ID                int       `json:"id"`
+	Name              string    `json:"name"`
+	Path              string    `json:"path"`
+	PathWithNamespace string    `json:"path_with_namespace"`
+	CreatedAt         time.Time `json:"created_at"`
+	DefaultBranch     string    `json:"default_branch"`
+	WebURL            string    `json:"web_url"`
+}
+
+var (
+	bitbucketURL     = flag.String("bitbucket-url", "", "Bitbucket Server URL")
+	bitbucketProject = flag.String("bitbucket-project", "", "Bitbucket Server project key")
+	bitbucketToken   = flag.String("bitbucket-token", "", "Bitbucket Server personal access token")
+	gitlabURL        = flag.String("gitlab-url", "", "GitLab URL")
+	gitlabToken      = flag.String("gitlab-token", "", "GitLab personal access token")
+	gitlabWorkspace  = flag.String("gitlab-workspace", "", "GitLab workspace (group) to migrate to")
+	inactiveYears    = flag.Int("inactive-years", 2, "Number of years a repository has been inactive")
+	migrate          = flag.Bool("migrate", false, "Trigger GitLab import for inactive repositories")
+	checkMigration   = flag.Bool("check-migration", false, "Check if the repository has been migrated to GitLab")
+	outputFile       = flag.String("output-file", "inactive_repos.txt", "File to write inactive repositories to")
+	logFile          = flag.String("log-file", "migration.log", "File to write logs to")
+	log              *slog.Logger
+)
+
+func main() {
+	flag.Parse()
+
+	logFile, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	if err != nil {
+		fmt.Printf("failed to open log file: %v\n", err)
+		os.Exit(1)
+	}
+	defer logFile.Close()
+
+	log = slog.New(slog.NewTextHandler(logFile, nil))
+
+	if *bitbucketURL == "" || *bitbucketProject == "" || *bitbucketToken == "" {
+		log.Error("Bitbucket URL, project, and token are required")
+		os.Exit(1)
+	}
+
+	if *migrate && (*gitlabURL == "" || *gitlabToken == "" || *gitlabWorkspace == "") {
+		log.Error("GitLab URL, token, and workspace are required for migration")
+		os.Exit(1)
+	}
+
+	inactiveRepos, err := getInactiveBitbucketRepos()
+	if err != nil {
+		log.Error("failed to get inactive Bitbucket repos", "error", err)
+		os.Exit(1)
+	}
+
+	if len(inactiveRepos) == 0 {
+		log.Info("No inactive repositories found")
+		return
+	}
+
+	if *migrate {
+		if err := migrateRepos(inactiveRepos); err != nil {
+			log.Error("failed to migrate repositories", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		if err := writeInactiveReposToFile(inactiveRepos); err != nil {
+			log.Error("failed to write inactive repositories to file", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	if *checkMigration {
+		if err := checkMigrationStatus(inactiveRepos); err != nil {
+			log.Error("failed to check migration status", "error", err)
+			os.Exit(1)
+		}
+	}
+}
+
+func getInactiveBitbucketRepos() ([]BitbucketRepo, error) {
+	var inactiveRepos []BitbucketRepo
+	start := 0
+	limit := 100
+
+	for {
+		url := fmt.Sprintf("%s/rest/api/1.0/projects/%s/repos?start=%d&limit=%d", *bitbucketURL, *bitbucketProject, start, limit)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+*bitbucketToken)
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to make request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
+		}
+
+		var reposResponse struct {
+			IsLastPage bool            `json:"isLastPage"`
+			Values     []BitbucketRepo `json:"values"`
+		}
+		if err := json.Unmarshal(body, &reposResponse); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+		}
+
+		for _, repo := range reposResponse.Values {
+			lastActivity := time.Unix(0, repo.Last*int64(time.Millisecond))
+			if time.Since(lastActivity).Hours() > float64(*inactiveYears*365*24) {
+				inactiveRepos = append(inactiveRepos, repo)
+			}
+		}
+
+		if reposResponse.IsLastPage {
+			break
+		}
+		start += limit
+	}
+
+	return inactiveRepos, nil
+}
+
+func migrateRepos(repos []BitbucketRepo) error {
+	for _, repo := range repos {
+		log.Info("Migrating repository", "repo", repo.Name)
+
+		// Check if the repo already exists in GitLab
+		gitlabRepo, err := getGitLabRepo(repo.Name)
+		if err != nil {
+			log.Error("failed to get GitLab repo", "error", err, "repo", repo.Name)
+			continue
+		}
+		if gitlabRepo != nil {
+			log.Info("Repository already exists in GitLab, skipping", "repo", repo.Name)
+			continue
+		}
+
+		importURL := fmt.Sprintf("%s/api/v4/projects/import/bitbucket_server", *gitlabURL)
+		payload := map[string]interface{}{
+			"bitbucket_server_url":      *bitbucketURL,
+			"bitbucket_server_project":  *bitbucketProject,
+			"bitbucket_server_repo":     repo.Slug,
+			"personal_access_token":     *bitbucketToken,
+			"target_namespace":          *gitlabWorkspace,
+			"new_name":                  repo.Name,
+			"bitbucket_server_username": "", // Optional, depending on your Bitbucket setup
+		}
+		jsonPayload, err := json.Marshal(payload)
+		if err != nil {
+			log.Error("failed to marshal payload", "error", err, "repo", repo.Name)
+			continue
+		}
+
+		req, err := http.NewRequest("POST", importURL, strings.NewReader(string(jsonPayload)))
+		if err != nil {
+			log.Error("failed to create request", "error", err, "repo", repo.Name)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("PRIVATE-TOKEN", *gitlabToken)
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Error("failed to make request", "error", err, "repo", repo.Name)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusCreated {
+			body, _ := ioutil.ReadAll(resp.Body)
+			log.Error("failed to import repository", "repo", repo.Name, "status_code", resp.StatusCode, "response", string(body))
+			continue
+		}
+
+		log.Info("Successfully initiated import for repository", "repo", repo.Name)
+	}
+	return nil
+}
+
+func checkMigrationStatus(repos []BitbucketRepo) error {
+	for _, repo := range repos {
+		gitlabRepo, err := getGitLabRepo(repo.Name)
+		if err != nil {
+			log.Error("failed to get GitLab repo", "error", err, "repo", repo.Name)
+			continue
+		}
+
+		if gitlabRepo != nil {
+			log.Info("Repository has been migrated to GitLab", "repo", repo.Name, "gitlab_url", gitlabRepo.WebURL)
+		} else {
+			log.Info("Repository has not been migrated to GitLab", "repo", repo.Name)
+		}
+	}
+	return nil
+}
+
+func getGitLabRepo(repoName string) (*GitLabRepo, error) {
+	url := fmt.Sprintf("%s/api/v4/projects?search=%s", *gitlabURL, repoName)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("PRIVATE-TOKEN", *gitlabToken)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var gitlabRepos []GitLabRepo
+	if err := json.Unmarshal(body, &gitlabRepos); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	for _, r := range gitlabRepos {
+		if r.Name == repoName && strings.HasPrefix(r.PathWithNamespace, *gitlabWorkspace+"/") {
+			return &r, nil
+		}
+	}
+
+	return nil, nil
+}
+
+func writeInactiveReposToFile(repos []BitbucketRepo) error {
+	f, err := os.Create(*outputFile)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer f.Close()
+
+	for _, repo := range repos {
+		if _, err := fmt.Fprintln(f, repo.Name); err != nil {
+			return fmt.Errorf("failed to write to output file: %w", err)
+		}
+	}
+	log.Info("Successfully wrote inactive repositories to file", "file", *outputFile)
+	return nil
+}
