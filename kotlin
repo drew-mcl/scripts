@@ -1,0 +1,64 @@
+// Root build.gradle.kts
+import com.google.gson.GsonBuilder
+import org.gradle.api.artifacts.ProjectDependency
+import java.nio.file.Files
+import java.nio.file.StandardOpenOption
+
+data class ProjectNode(
+    val projectDir: String,
+    val dependencies: List<String>
+)
+
+abstract class DependencyGraphTask : DefaultTask() {
+
+    @get:OutputFile
+    val output = project.layout.buildDirectory.file("dependency-graph.json")
+
+    @TaskAction
+    fun generate() {
+        val gson = GsonBuilder().setPrettyPrinting().create()
+        val rootDir = project.rootProject.projectDir
+
+        val graph: MutableMap<String, ProjectNode> = mutableMapOf()
+
+        project.rootProject.allprojects.forEach { proj ->
+            /* Collect ONLY direct project → project edges, fast & cheap */
+            val directProjectDeps = proj.configurations
+                .filter { cfg ->
+                    cfg.name in setOf(
+                        "implementation",
+                        "api",
+                        "compileClasspath",
+                        "runtimeClasspath"
+                    ) && cfg.canBeResolved   // avoids resolving variant-aware graphs
+                }
+                .flatMap { cfg ->            // no expensive transitive walk
+                    cfg.dependencies.withType(ProjectDependency::class.java)
+                }
+                .map { it.dependencyProject.path }
+                .distinct()
+
+            /* Path of this module relative to repo root, same as your Go struct */
+            val relPath = proj.projectDir.relativeTo(rootDir).invariantSeparatorsPath
+
+            graph[proj.path] = ProjectNode(relPath, directProjectDeps)
+        }
+
+        /* Serialize once, write atomically */
+        val json = gson.toJson(graph)
+        Files.createDirectories(output.get().asFile.parentFile.toPath())
+        Files.writeString(
+            output.get().asFile.toPath(),
+            json,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE
+        )
+        logger.lifecycle("Dependency graph written to ${output.get().asFile}")
+    }
+}
+
+tasks.register<DependencyGraphTask>("exportDependencyGraph") {
+    group = "ci"
+    description = "Exports a JSON map of :projectPath -> { projectDir, dependencies }"
+}
