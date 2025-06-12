@@ -1,0 +1,54 @@
+import com.google.gson.GsonBuilder
+import org.gradle.api.DefaultTask
+import org.gradle.api.artifacts.ProjectDependency
+import org.gradle.api.tasks.OutputFile
+import org.gradle.api.tasks.TaskAction
+import java.nio.file.Files
+import java.nio.file.StandardOpenOption
+
+data class ProjectNode(val projectDir: String, val dependencies: List<String>)
+
+abstract class DependencyGraphTask : DefaultTask() {
+
+    @get:OutputFile
+    val output = project.layout.buildDirectory.file("dependency-graph.json")
+
+    @TaskAction
+    fun generate() {
+        val gson   = GsonBuilder().setPrettyPrinting().create()
+        val root   = project.rootProject.projectDir
+        val graph  = mutableMapOf<String, ProjectNode>()
+
+        project.rootProject.allprojects.forEach { p ->
+            val directProjectDeps =
+                p.configurations                      // every declared configuration …
+                    .flatMap { cfg ->                 // … no need to name them
+                        cfg.dependencies
+                            .withType(ProjectDependency::class.java)   // only project()
+                    }
+                    .map { it.dependencyProject.path } // -> ':lib:core'
+                    .distinct()
+
+            val relPath = p.projectDir
+                .relativeTo(root)
+                .invariantSeparatorsPath              // e.g. "lib/core"
+
+            graph[p.path] = ProjectNode(relPath, directProjectDeps)
+        }
+
+        Files.createDirectories(output.get().asFile.parentFile.toPath())
+        Files.writeString(
+            output.get().asFile.toPath(),
+            gson.toJson(graph),
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE
+        )
+        logger.lifecycle("Dependency graph written to ${output.get().asFile}")
+    }
+}
+
+tasks.register<DependencyGraphTask>("exportDependencyGraph") {
+    group = "ci"
+    description = "Exports { :projectPath -> { projectDir, [direct project paths] } }"
+}
