@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,39 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+const (
+	reset = "\033[0m"
+	red   = "\033[31m"
+	yel   = "\033[33m"
+	gre   = "\033[32m"
+	blu   = "\033[34m"
+)
+
+type colorHandler struct{ slog.Handler }
+
+func (h colorHandler) Handle(ctx context.Context, r slog.Record) error {
+	var color string
+	switch {
+	case r.Level >= slog.LevelError:
+		color = red
+	case r.Level >= slog.LevelWarn:
+		color = yel
+	case r.Level >= slog.LevelInfo:
+		color = gre
+	default: // debug / trace
+		color = blu
+	}
+	fmt.Fprint(os.Stderr, color)
+	err := h.Handler.Handle(ctx, r) // delegate actual formatting
+	fmt.Fprint(os.Stderr, reset)
+	return err
+}
+
+func init() {
+	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
+	logger = slog.New(colorHandler{base})
+}
 
 // Logger will be our structured logger.
 var logger *slog.Logger
