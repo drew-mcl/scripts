@@ -11,11 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
-
-	"golang.org/x/mod/semver" // Using standard library module for semantic versioning
 )
 
 //
@@ -54,15 +51,9 @@ func (h colorHandler) Handle(ctx context.Context, r slog.Record) error {
 var logger *slog.Logger
 
 // init initializes a structured logger for the application.
-// It uses a colorized text handler for local runs and can be swapped for a JSON handler for CI.
 func init() {
-	// For local development, a colorful logger is nice.
-	// For GitLab CI, you might swap this with:
-	// logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-		// For cleaner logs, you can hide the source file path.
-		// AddSource: false,
 	})
 	logger = slog.New(colorHandler{base})
 }
@@ -110,11 +101,10 @@ func run() error {
 	logger.Info("configuration loaded", "app", cfg.AppName, "version", cfg.ReleaseVersion, "tag", cfg.NewTag)
 
 	// --- 2. Find Previous Tag ---
-	// We fetch tags first to ensure we have the latest information.
 	if _, err := runGitCommand("fetch", "--tags"); err != nil {
 		return fmt.Errorf("failed to fetch git tags: %w", err)
 	}
-	previousTag, err := findPreviousTag(cfg.AppName, cfg.NewTag)
+	previousTag, err := findPreviousTag(cfg.AppName)
 	if err != nil {
 		return fmt.Errorf("could not determine previous tag: %w", err)
 	}
@@ -182,9 +172,6 @@ func loadConfig() (*Config, error) {
 	if cfg.ReleaseVersion == "" {
 		return nil, fmt.Errorf("RELEASE_VERSION environment variable is not set")
 	}
-	if !semver.IsValid("v" + cfg.ReleaseVersion) {
-		return nil, fmt.Errorf("RELEASE_VERSION '%s' is not a valid semantic version", cfg.ReleaseVersion)
-	}
 	if cfg.ProjectID == "" {
 		return nil, fmt.Errorf("CI_PROJECT_ID environment variable is not set")
 	}
@@ -192,7 +179,8 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("GITLAB_API_TOKEN environment variable is not set")
 	}
 
-	cfg.NewTag = fmt.Sprintf("%s/v%s", cfg.AppName, cfg.ReleaseVersion)
+	// The 'v' prefix is removed from the tag.
+	cfg.NewTag = fmt.Sprintf("%s/%s", cfg.AppName, cfg.ReleaseVersion)
 
 	// Load the dependency graph
 	graph, err := loadProjects(cfg.GraphFile)
@@ -243,41 +231,24 @@ func runGitCommand(args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// findPreviousTag finds the latest semantic version tag for a specific app.
-func findPreviousTag(appName, newTag string) (string, error) {
-	tagPrefix := appName + "/"
-	out, err := runGitCommand("tag", "-l", tagPrefix+"*")
+// findPreviousTag finds the most recent tag for a specific app based on commit date.
+func findPreviousTag(appName string) (string, error) {
+	tagPrefix := appName + "/*"
+
+	// Use for-each-ref to get tags sorted by most recent committer date first.
+	// This finds the latest tag chronologically.
+	out, err := runGitCommand("for-each-ref", "--sort=-committerdate", fmt.Sprintf("refs/tags/%s", tagPrefix), "--format=%(refname:short)", "--count=1")
 	if err != nil {
 		return "", err
 	}
 
-	tags := strings.Split(out, "\n")
-	if len(tags) == 0 || (len(tags) == 1 && tags[0] == "") {
+	// If the output is empty, no tags were found for this app.
+	if out == "" {
 		logger.Warn("no previous tags found for app, will compare against initial commit", "app", appName)
 		return getFirstCommitForPath("apps/" + appName)
 	}
 
-	var validTags []string
-	for _, tag := range tags {
-		// remove prefix for semver comparison
-		version := strings.TrimPrefix(tag, tagPrefix)
-		if semver.IsValid(version) {
-			validTags = append(validTags, version)
-		}
-	}
-
-	if len(validTags) == 0 {
-		logger.Warn("no valid semantic version tags found, will compare against initial commit", "app", appName)
-		return getFirstCommitForPath("apps/" + appName)
-	}
-
-	// Sort tags using semantic versioning rules
-	sort.Slice(validTags, func(i, j int) bool {
-		return semver.Compare(validTags[i], validTags[j]) < 0
-	})
-
-	// Return the latest tag, which is the last in the sorted list.
-	return tagPrefix + validTags[len(validTags)-1], nil
+	return out, nil
 }
 
 // getFirstCommitForPath finds the hash of the very first commit that touched a given path.
@@ -333,7 +304,7 @@ func findAppAndDependencyPaths(cfg *Config) ([]string, error) {
 
 // getChangelog generates a formatted changelog string from git commits.
 func getChangelog(fromRef, toRef string, paths []string) (string, error) {
-	// The format is: <short-hash> <commit-subject>
+	// The format is: * <short-hash> <commit-subject>
 	gitLogCmd := []string{"log", "--pretty=format:* %h %s", fmt.Sprintf("%s..%s", fromRef, toRef), "--"}
 	gitLogCmd = append(gitLogCmd, paths...)
 
