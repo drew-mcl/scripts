@@ -1,0 +1,111 @@
+package ansibleinv
+
+import (
+	"fmt"
+	"os"
+
+	"gopkg.in/yaml.v3"
+)
+
+// yamlGroupNode is a temporary struct used for unmarshalling the raw YAML data.
+// It directly maps to the structure of an Ansible YAML inventory group.
+type yamlGroupNode struct {
+	Hosts    map[string]map[string]any `yaml:"hosts"`
+	Vars     map[string]any            `yaml:"vars"`
+	Children map[string]*yamlGroupNode `yaml:"children"`
+}
+
+// ParseYAMLFile reads an inventory file from the given path and parses it.
+func ParseYAMLFile(path string) (*Inventory, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("could not read YAML inventory file: %w", err)
+	}
+
+	// Unmarshal the raw YAML into a map of our temporary node structs.
+	// The top-level keys in the YAML file (e.g., "all") become the keys of this map.
+	var topLevelGroups map[string]*yamlGroupNode
+	if err := yaml.Unmarshal(data, &topLevelGroups); err != nil {
+		return nil, fmt.Errorf("could not unmarshal YAML: %w", err)
+	}
+
+	inv := NewInventory()
+
+	// Recursively process each top-level group from the YAML file.
+	for groupName, node := range topLevelGroups {
+		processYAMLGroup(inv, groupName, node)
+	}
+
+	// After parsing, propagate hosts from children up to their parents.
+	populateParentHosts(inv)
+
+	return inv, nil
+}
+
+// processYAMLGroup is a recursive function that populates the main Inventory
+// struct from the temporary yamlGroupNode structs.
+func processYAMLGroup(inv *Inventory, name string, node *yamlGroupNode) *Group {
+	// Get or create the group in our main inventory.
+	group, exists := inv.Groups[name]
+	if !exists {
+		group = &Group{
+			Name:     name,
+			Hosts:    make(map[string]*Host),
+			Vars:     make(map[string]any),
+			Children: make(map[string]*Group),
+		}
+		inv.Groups[name] = group
+	}
+
+	// Copy variables to the group.
+	for k, v := range node.Vars {
+		group.Vars[k] = v
+	}
+
+	// Process all hosts defined in this group.
+	for hostName, hostVars := range node.Hosts {
+		// Get or create the host in the global host list.
+		host, hostExists := inv.Hosts[hostName]
+		if !hostExists {
+			host = &Host{Name: hostName, Vars: make(map[string]any)}
+			inv.Hosts[hostName] = host
+		}
+		// Copy host-specific variables.
+		for k, v := range hostVars {
+			host.Vars[k] = v
+		}
+		// Add the host to the current group.
+		group.Hosts[hostName] = host
+	}
+
+	// Recurse for all children groups.
+	for childName, childNode := range node.Children {
+		childGroup := processYAMLGroup(inv, childName, childNode)
+		group.Children[childName] = childGroup
+	}
+
+	return group
+}
+
+// populateParentHosts ensures that a parent group contains all hosts from its children, recursively.
+// This is how Ansible's group inheritance works.
+func populateParentHosts(inv *Inventory) {
+	// This loop is necessary to handle multi-level inheritance (grand-children, etc.).
+	// It continues until a full pass over all groups adds no new hosts.
+	for {
+		hostsAdded := 0
+		for _, group := range inv.Groups {
+			for _, child := range group.Children {
+				for hostName, host := range child.Hosts {
+					if _, exists := group.Hosts[hostName]; !exists {
+						group.Hosts[hostName] = host
+						hostsAdded++
+					}
+				}
+			}
+		}
+		if hostsAdded == 0 {
+			break
+		}
+	}
+}
