@@ -1,0 +1,24 @@
+services:
+  refdata-server:
+    cmd: start app
+  faxer-sender:
+    cmd: start app
+    depends_on: [refdata-server]
+  faxer-reciver: 
+    cmd: start app
+  sor:
+    replicas: 8
+    cmd: ./sor --shard $INDEX
+    depends_on: [faxer-reciver, muse-eq, watchdog, bog]
+  muse-eq:
+    cmd: muse start
+    depends_on: []
+  watchdog:
+    cmd: ./router --route B
+    depends_on: []
+  big:
+    cmd: fpa
+    depends_on: [watchdog, sor]
+  bog:
+    cmd: fpa
+    depends_on: []

@@ -1,0 +1,3 @@
+placements:
+  faxer-reciver:  { colocate_with: sor }     
+  muse-eq:  { colocate_with: sor }

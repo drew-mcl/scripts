@@ -1,0 +1,35 @@
+
+watchdog:
+  cmd: start watchdog
+
+big:
+  cmd: start big
+  depends_on: [watchdog]
+
+refdata-server:
+  cmd: start refdata-server
+
+muse:
+  cmd: start muse
+
+faxer-sender:
+  cmd: start faxer-sender
+  depends_on: [refdata-server]
+
+faxer-receiver:
+  cmd: start faxer-receiver
+  depends_on: [faxer-sender]
+
+sor:
+  cmd: start sor
+  depends_on:
+    - faxer-receiver
+    - muse
+    - watchdog
+    - big
+
+bog:
+  cmd: start bog
+  depends_on:
+    - watchdog
+    - sor
