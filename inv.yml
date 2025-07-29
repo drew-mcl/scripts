@@ -1,0 +1,22 @@
+env: development                      
+
+configVolume:
+  name: inventory
+  mountPath: /work/inventory
+
+cacheVolume:
+  name: cache
+  claimName: ansible-cache-pvc        
+  mountPath: /cache
+
+cronjobs:
+  - name: sod                          # Start-of-day
+    schedule: "30 6 * * 1-5"           # 06:30 Mon-Fri (TZ is Chart default)
+    args: ["ansible-playbook", "/work/start-of-day.yml"]
+  - name: eod                          # End-of-day
+    schedule: "0 22 * * 1-5"           # 22:00 Mon-Fri
+    args: ["ansible-playbook", "/work/end-of-day.yml"]
+
+image:
+  repository: ghcr.io/ansible/ansible-runner
+  tag: latest
