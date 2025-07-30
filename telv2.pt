@@ -3,29 +3,42 @@
 # GNU General Public License v3.0+ (see LICENSES/GPL-3.0-or-later.txt or https://www.gnu.org/licenses/gpl-3.0.txt)
 # SPDX-License-Identifier: GPL-3.0-or-later
 """
-Modern, production‑ready OpenTelemetry callback plugin for Ansible.
-Highlights
-----------
-* **Zero‑config TLS** – uses the native system trust store on RHEL (and other Linux
-  distros) for secure gRPC or HTTP/Protobuf export without bundling custom CAs.
-* **Semantic attributes** – aligns with OpenTelemetry Semantic Conventions
-  (`ansible.*`, `net.*`, `code.*`, etc.) for out‑of‑the‑box service maps and
-  dashboards.
-* **Minimal runtime overhead** – batch exporter with default span limits and a
-  fast, in‑memory task cache.
-* **Opt‑in verbosity** – toggle rich console debug messages via
-  `ANSIBLE_SKYNET_DEBUG_LOGGING=true`.
+`skynet_reporting.py` – Modern OpenTelemetry callback plugin for **Ansible 2.14+**
 
-Drop the file into any directory listed in `callback_plugins` and enable it via
-`callbacks_enabled = skynet_reporting`.
+Highlights
+==========
+* **Native TLS** – uses the system trust store (`ssl.create_default_context()`), so
+  no custom CA bundle is required on RHEL / other Linux distros.
+* **OpenTelemetry Semantic Conventions** – attributes prefixed with `ansible.*`,
+  `host.*`, `code.*`, giving you rich service‑maps out‑of‑the‑box.
+* **Resilient config** – any unknown/typo option is ignored (with a warning)
+  instead of breaking plugin loading.
+* **Fast & lightweight** – spans are batched with the default exporter limits;
+  only a tiny in‑memory dict is used to stash task start times.
+* **Debug toggle** – set `ANSIBLE_SKYNET_DEBUG_LOGGING=true` (or the ini option)
+  to stream detailed state to the Ansible console.
+
+Add to `ansible.cfg`::
+
+    [defaults]
+    callbacks_enabled = skynet_reporting
+    callback_plugins  = ./callback_plugins
+
+    [callback_skynet_reporting]
+    endpoint  = https://otel‑collector.internal:4317
+    neuron_team = trading
+    neuron_app  = fx‑pricing
+    enable_debug_logging = true
+
+Environment variables still take precedence (`OTEL_EXPORTER_OTLP_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`, `TRACEPARENT`, etc.).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from time import time_ns
 import os
 import ssl
-import sys
+from dataclasses import dataclass, field
+from time import time_ns
 from typing import Any, Dict, Optional
 from os.path import basename
 
@@ -34,37 +47,32 @@ from ansible.module_utils.ansible_release import __version__ as ansible_version
 from ansible.plugins.callback import CallbackBase
 
 try:
-    # OpenTelemetry 1.25+ layout
     from opentelemetry import trace
-    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.trace import SpanKind
-    from opentelemetry.trace.status import Status, StatusCode
-    from opentelemetry.propagate import get_global_textmap
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
         OTLPSpanExporter as GRPCSpanExporter,
     )
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
         OTLPSpanExporter as HTTPSpanExporter,
     )
+    from opentelemetry.propagate import get_global_textmap
+    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.trace import SpanKind
+    from opentelemetry.trace.status import Status, StatusCode
 
     _HAS_OTEL = True
-except ImportError as exc:  # pragma: no cover – handled at runtime
+except ImportError as exc:  # pragma: no cover – runtime guard
     _HAS_OTEL = False
     _OTEL_IMPORT_ERROR = exc
 
-
 __all__ = ["CallbackModule"]
 
-
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Helper dataclasses
 # ---------------------------------------------------------------------------
 @dataclass
 class _TaskKey:
-    """Composite key to uniquely identify host‑task pair."""
-
     task_uuid: str
     host_uuid: str
 
@@ -73,100 +81,58 @@ class _TaskKey:
 
 
 @dataclass
-class _TaskMetadata:
+class _TaskMeta:
     span_name: str
     start_ns: int
-    attributes: Dict[str, Any] = field(default_factory=dict)
-
-
-class _Config:
-    """Resolves option precedence (Ansible ini → env vars → defaults) with
-    defensive fall-backs so unknown/typo keys never break plugin loading.
-    """
-
-    def __init__(self, callback: "CallbackModule"):
-        self._cb = callback
-
-    # ------------------------------------------------------------------
-    # Generic accessor with KeyError guard
-    # ------------------------------------------------------------------
-    def opt(self, key: str, default: Any = None) -> Any:
-        """Return option *key* if defined, else *default*.
-
-        Using ``get_option`` directly can raise ``KeyError`` when the user
-        supplies a value that isn't declared in ``DOCUMENTATION``. We swallow
-        that error here so the plugin still loads (we'll surface a warning
-        later).
-        """
-        try:
-            val = self._cb.get_option(key)
-        except Exception:  # KeyError or AnsibleOptionError depending on version
-            return default
-        return val if val is not None else default
-
-    # Convenience wrappers ---------------------------------------------------
-    @property
-    def endpoint(self) -> Optional[str]:
-        return self.opt("endpoint") or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-
-    @property
-    def protocol(self) -> str:
-        return os.getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc").lower()
-
-    @property
-    def team(self) -> str:
-        return self.opt("neuron_team", "unknown_team")
-
-    @property
-    def app(self) -> str:
-        return self.opt("neuron_app", "unknown_app")
-
-    @property
-    def traceparent(self) -> Optional[str]:
-        return self.opt("traceparent")
-
-    @property
-    def debug(self) -> bool:
-        env_debug = os.getenv("ANSIBLE_SKYNET_DEBUG_LOGGING", "false").lower() == "true"
-        # Normalise to bool in case .ini sets it as string
-        return bool(str(self.opt("enable_debug_logging", env_debug)).lower() == "true")(self, callback: "CallbackModule"):
-        self._cb = callback
-
-    def opt(self, key: str, default: Any = None) -> Any:
-        val = self._cb.get_option(key)
-        if val is not None:
-            return val
-        return default
-
-    # Convenience wrappers ---------------------------------------------------
-    @property
-    def endpoint(self) -> Optional[str]:
-        return self.opt("endpoint") or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-
-    @property
-    def protocol(self) -> str:
-        return os.getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc").lower()
-
-    @property
-    def team(self) -> str:
-        return self.opt("neuron_team", "unknown_team")
-
-    @property
-    def app(self) -> str:
-        return self.opt("neuron_app", "unknown_app")
-
-    @property
-    def traceparent(self) -> Optional[str]:
-        return self.opt("traceparent")
-
-    @property
-    def debug(self) -> bool:
-        env_debug = os.getenv("ANSIBLE_SKYNET_DEBUG_LOGGING", "false").lower() == "true"
-        return bool(self.opt("enable_debug_logging", env_debug))
+    attrs: Dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
-# Callback plugin implementation
+# Configuration resolver
+# ---------------------------------------------------------------------------
+class _Config:
+    """Resolve ini → env → defaults with graceful fall‑backs."""
+
+    def __init__(self, cb: "CallbackModule"):
+        self._cb = cb
+
+    # Generic accessor -----------------------------------------------------
+    def _opt(self, key: str, default: Any = None) -> Any:
+        try:
+            val = self._cb.get_option(key)
+        except Exception:  # unknown key / AnsibleOptionError
+            return default
+        return val if val not in (None, "") else default
+
+    # Convenience wrappers --------------------------------------------------
+    @property
+    def endpoint(self) -> Optional[str]:
+        return self._opt("endpoint") or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+
+    @property
+    def protocol(self) -> str:
+        return os.getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc").lower()
+
+    @property
+    def team(self) -> str:
+        return self._opt("neuron_team", "unknown_team")
+
+    @property
+    def app(self) -> str:
+        return self._opt("neuron_app", "unknown_app")
+
+    @property
+    def traceparent(self) -> Optional[str]:
+        return self._opt("traceparent")
+
+    @property
+    def debug(self) -> bool:
+        env_flag = os.getenv("ANSIBLE_SKYNET_DEBUG_LOGGING", "false").lower() == "true"
+        return str(self._opt("enable_debug_logging", env_flag)).lower() == "true"
+
+
+# ---------------------------------------------------------------------------
+# Main callback plugin
 # ---------------------------------------------------------------------------
 class CallbackModule(CallbackBase):
     CALLBACK_VERSION = 2.0
@@ -174,151 +140,123 @@ class CallbackModule(CallbackBase):
     CALLBACK_NAME = "skynet_reporting"
     CALLBACK_NEEDS_ENABLED = True
 
-    def __init__(self, display=None):  # noqa: D401, N802 (Ansible signature)
+    # ------------------------------------------------------------------
+    # Ansible lifecycle hooks
+    # ------------------------------------------------------------------
+    def __init__(self, display=None):  # noqa: D401 (Ansible signature)
         super().__init__(display=display)
         if not _HAS_OTEL:
             raise AnsibleError(
-                "OpenTelemetry libraries are required: pip install opentelemetry-sdk opentelemetry-exporter-otlp grpcio"
+                "OpenTelemetry libraries missing – `pip install opentelemetry-sdk opentelemetry-exporter-otlp grpcio`"
             ) from _OTEL_IMPORT_ERROR
 
         self.cfg: Optional[_Config] = None
         self.tracer_provider: Optional[TracerProvider] = None
         self.tracer = None
         self.root_span = None
-        self._pending: Dict[_TaskKey, _TaskMetadata] = {}
-        self._failed_tasks = 0
+        self._pending: Dict[_TaskKey, _TaskMeta] = {}
+        self._failed = 0
 
-    # ---------------------------------------------------------------------
-    # Utility methods
-    # ---------------------------------------------------------------------
-    def _d(self, msg: str):  # debug shortcut
+    # Utility ------------------------------------------------------------
+    def _dbg(self, msg: str):
         if self.cfg and self.cfg.debug:
-            self._display.v(f"[{self.CALLBACK_NAME}] {msg}")
+            self._display.v(f"[skynet_reporting] {msg}")
 
-    def _ensure_otel(self):
-        if self.tracer:  # already initialised
-            return
-
-        if not self.cfg.endpoint:
-            self._display.warning(
-                "[skynet_reporting] OTLP endpoint not configured – traces will NOT be exported."
-            )
-            return
-
-        # Service name: ansible.skynet.<team>.<app>
-        service_name = f"ansible.skynet.{self.cfg.team}.{self.cfg.app}"
-        resource = Resource.create({SERVICE_NAME: service_name})
-        self.tracer_provider = TracerProvider(resource=resource)
-
-        exporter = None
-        if self.cfg.protocol == "grpc":
-            # grpc ssl_channel_credentials() == system trust store.
-            credentials = ssl.create_default_context()
-            exporter = GRPCSpanExporter(endpoint=self.cfg.endpoint, credentials=credentials)
-        elif self.cfg.protocol in {"http", "http/protobuf"}:
-            exporter = HTTPSpanExporter(endpoint=self.cfg.endpoint)
-        else:
-            self._display.warning(
-                f"[skynet_reporting] Unsupported protocol '{self.cfg.protocol}'. No spans will be exported."
-            )
-            return
-
-        processor = BatchSpanProcessor(exporter)
-        self.tracer_provider.add_span_processor(processor)
-        trace.set_tracer_provider(self.tracer_provider)
-        self.tracer = trace.get_tracer(self.CALLBACK_NAME, ansible_version)
-        self._d("OpenTelemetry tracer initialised.")
-
-    # ------------------------------------------------------------------
-    # Ansible callback overrides
-    # ------------------------------------------------------------------
-    def set_options(self, task_keys=None, var_options=None, direct=None):  # noqa: D401, N802 (Ansible signature)
+    def set_options(self, task_keys=None, var_options=None, direct=None):  # noqa: N802
         super().set_options(task_keys=task_keys, var_options=var_options, direct=direct)
         self.cfg = _Config(self)
         if self.cfg.debug:
-            self._display.banner("[skynet_reporting] Debug logging ENABLED")
+            self._display.banner("[skynet_reporting] Debug logging enabled")
 
-    # ---------------- Playbook lifecycle ----------------------------------
-    def v2_playbook_on_start(self, playbook):  # noqa: N802 (Ansible signature)
-        self._ensure_otel()
+    # OpenTelemetry bootstrap -------------------------------------------
+    def _ensure_tracer(self):
+        if self.tracer or not self.cfg:
+            return
+        if not self.cfg.endpoint:
+            self._display.warning("[skynet_reporting] No OTLP endpoint – spans will not be exported.")
+            return
+
+        resource = Resource.create({SERVICE_NAME: f"ansible.skynet.{self.cfg.team}.{self.cfg.app}"})
+        self.tracer_provider = TracerProvider(resource=resource)
+
+        if self.cfg.protocol == "grpc":
+            creds = ssl.create_default_context()  # uses system CA bundle
+            exporter = GRPCSpanExporter(endpoint=self.cfg.endpoint, credentials=creds)
+        elif self.cfg.protocol in {"http", "http/protobuf"}:
+            exporter = HTTPSpanExporter(endpoint=self.cfg.endpoint)
+        else:
+            self._display.warning(f"[skynet_reporting] Unsupported protocol '{self.cfg.protocol}'.")
+            return
+
+        self.tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
+        trace.set_tracer_provider(self.tracer_provider)
+        self.tracer = trace.get_tracer(__name__, ansible_version)
+        self._dbg("Tracer initialised.")
+
+    # Playbook start -----------------------------------------------------
+    def v2_playbook_on_start(self, playbook):  # noqa: N802
+        self._ensure_tracer()
         if not self.tracer:
             return
 
-        pb_name = basename(playbook._file_name)
-        carrier = {"traceparent": self.cfg.traceparent} if self.cfg.traceparent else None
-        parent_ctx = (
-            get_global_textmap().extract(carrier) if carrier else trace.INVALID_SPAN_CONTEXT
-        )
+        name = basename(playbook._file_name)
+        carrier = {"traceparent": self.cfg.traceparent} if self.cfg and self.cfg.traceparent else None
+        parent_ctx = get_global_textmap().extract(carrier) if carrier else trace.INVALID_SPAN_CONTEXT
 
         self.root_span = self.tracer.start_span(
-            name=f"playbook:{pb_name}",
-            kind=SpanKind.SERVER,
-            context=parent_ctx,
+            name=f"playbook:{name}", kind=SpanKind.SERVER, context=parent_ctx
         )
-        self.root_span.set_attribute("ansible.playbook.name", pb_name)
+        self.root_span.set_attribute("ansible.playbook.name", name)
         self.root_span.set_attribute("ansible.version", ansible_version)
         self.root_span.set_attribute("neuron.team", self.cfg.team)
         self.root_span.set_attribute("neuron.app", self.cfg.app)
-        self._d(f"Root span created for playbook '{pb_name}'.")
+        self._dbg(f"Root span created for '{name}'.")
 
-    # ---------------- Task execution hooks --------------------------------
+    # Task start ---------------------------------------------------------
     def v2_playbook_on_task_start(self, task, is_conditional):  # noqa: N802
         if not self.root_span:
             return
-        # Cache start time – we finalise when per‑host results arrive.
         for host in task._hosts:
-            key = _TaskKey(task_uuid=task._uuid, host_uuid=host._uuid)
-            self._pending[key] = _TaskMetadata(
+            key = _TaskKey(task._uuid, host._uuid)
+            self._pending[key] = _TaskMeta(
                 span_name=f"{task.get_name()} on {host.name}",
                 start_ns=time_ns(),
-                attributes={
+                attrs={
                     "ansible.task.name": task.get_name(),
                     "ansible.task.action": task.action,
                     "code.filepath": task.get_path(),
+                    "host.name": host.name,
                 },
             )
 
-    def _finish(self, result, status_str: str):
+    # Internal helper to close spans ------------------------------------
+    def _finish(self, result, status: str):
         if not self.root_span:
             return
-        host = result._host
-        task = result._task
-        key = _TaskKey(task_uuid=task._uuid, host_uuid=host._uuid)
+        task, host = result._task, result._host
+        key = _TaskKey(task._uuid, host._uuid)
         meta = self._pending.pop(key, None)
-        if meta is None:
-            # Fallback – shouldn't happen, but guard against KeyError
-            meta = _TaskMetadata(span_name=f"{task.get_name()} on {host.name}", start_ns=time_ns())
-        meta.attributes.update(
-            {
-                "host.name": host.name,
-                "ansible.task.status": status_str,
-                "ansible.result.changed": result._result.get("changed", False),
-            }
-        )
+        if not meta:  # shouldn’t happen but guard anyway
+            meta = _TaskMeta(span_name=f"{task.get_name()} on {host.name}", start_ns=time_ns())
+
+        meta.attrs.update({"ansible.task.status": status, "ansible.result.changed": result._result.get("changed", False)})
 
         ctx = trace.set_span_in_context(self.root_span)
-        span = self.tracer.start_span(
-            name=meta.span_name,
-            kind=SpanKind.INTERNAL,
-            context=ctx,
-            start_time=meta.start_ns,
-        )
-        for k, v in meta.attributes.items():
+        span = self.tracer.start_span(meta.span_name, kind=SpanKind.INTERNAL, context=ctx, start_time=meta.start_ns)
+        for k, v in meta.attrs.items():
             span.set_attribute(k, v)
 
-        # Failure handling --------------------------------------------------
-        if status_str == "failed":
-            self._failed_tasks += 1
+        if status == "failed":
+            self._failed += 1
             span.record_exception(Exception(result._result.get("msg", "task failed")))
             span.set_status(Status(StatusCode.ERROR))
-        elif status_str == "skipped":
+        elif status == "skipped":
             span.set_status(Status(StatusCode.UNSET))
         else:
             span.set_status(Status(StatusCode.OK))
-
         span.end()
 
-    # Result hooks ----------------------------------------------------------
+    # Runner hooks --------------------------------------------------------
     def v2_runner_on_ok(self, result):  # noqa: N802
         self._finish(result, "ok")
 
@@ -328,18 +266,16 @@ class CallbackModule(CallbackBase):
     def v2_runner_on_skipped(self, result):  # noqa: N802
         self._finish(result, "skipped")
 
-    # ---------------- Playbook end ----------------------------------------
+    # Playbook end --------------------------------------------------------
     def v2_playbook_on_stats(self, stats):  # noqa: N802
         if not self.root_span:
             return
-        if self._failed_tasks:
-            self.root_span.set_status(
-                Status(StatusCode.ERROR, f"{self._failed_tasks} task(s) failed")
-            )
+        if self._failed:
+            self.root_span.set_status(Status(StatusCode.ERROR, f"{self._failed} task(s) failed"))
         else:
             self.root_span.set_status(Status(StatusCode.OK))
         self.root_span.end()
-        self._d("Root span ended – forcing exporter flush.")
+        self._dbg("Root span ended – flushing exporter.")
         if self.tracer_provider:
             self.tracer_provider.force_flush()
-        self._d("Export complete.")
+        self._dbg("Flush complete.")
