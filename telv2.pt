@@ -7,8 +7,8 @@
 
 Highlights
 ==========
-* **Native TLS** – uses the system trust store (`ssl.create_default_context()`), so
-  no custom CA bundle is required on RHEL / other Linux distros.
+* **Native TLS** – uses the system trust store, so no custom CA bundle is required
+  on RHEL / other Linux distros.
 * **OpenTelemetry Semantic Conventions** – attributes prefixed with `ansible.*`,
   `host.*`, `code.*`, giving you rich service‑maps out‑of‑the-box.
 * **Resilient config** – any unknown/typo option is ignored (with a warning)
@@ -289,10 +289,100 @@ class CallbackModule(CallbackBase):
             return
 
         name = basename(playbook._file_name)
-        carrier = {"traceparent": self.cfg.traceparent} if self.cfg and self.cfg.traceparent else None
-        parent_ctx = get_global_textmap().extract(carrier) if carrier else trace.INVALID_SPAN_CONTEXT
+        
+        # Use an empty dictionary if traceparent is not set.
+        # This correctly starts a new trace within the current context.
+        carrier = {"traceparent": self.cfg.traceparent} if self.cfg and self.cfg.traceparent else {}
+        parent_ctx = get_global_textmap().extract(carrier)
 
         self.root_span = self.tracer.start_span(
             name=f"playbook:{name}", kind=SpanKind.SERVER, context=parent_ctx
         )
         self.root_span.set_attribute("ansible.playbook.name", name)
+        self.root_span.set_attribute("ansible.version", ansible_version)
+        self.root_span.set_attribute("neuron.team", self.cfg.team)
+        self.root_span.set_attribute("neuron.app", self.cfg.app)
+        self._dbg(f"Root span created for '{name}'.")
+
+    # Task start ---------------------------------------------------------
+    def v2_playbook_on_task_start(self, task, is_conditional):  # noqa: N802
+        if not self.root_span:
+            return
+        for host in task._hosts:
+            key = _TaskKey(task._uuid, host._uuid)
+            self._pending[key] = _TaskMeta(
+                span_name=f"{task.get_name()} on {host.name}",
+                start_ns=time_ns(),
+                attrs={
+                    "ansible.task.name": task.get_name(),
+                    "ansible.task.action": task.action,
+                    "code.filepath": task.get_path(),
+                    "host.name": host.name,
+                },
+            )
+
+    # Internal helper to close spans ------------------------------------
+    def _finish(self, result, status: str):
+        if not self.root_span:
+            return
+        task, host = result._task, result._host
+        key = _TaskKey(task._uuid, host._uuid)
+        meta = self._pending.pop(key, None)
+        if not meta:  # shouldn’t happen but guard anyway
+            meta = _TaskMeta(span_name=f"{task.get_name()} on {host.name}", start_ns=time_ns())
+
+        # Safely interrogate `result._result`, which is *usually* a dict but can be
+        # a raw AnsibleUnicode/string for some callback events (e.g. include).
+        res = result._result if isinstance(result._result, dict) else {}
+        changed = bool(res.get("changed")) if isinstance(res, dict) else False
+
+        meta.attrs.update({
+            "ansible.task.status": status,
+            "ansible.result.changed": changed,
+        })
+
+        ctx = trace.set_span_in_context(self.root_span)
+        span = self.tracer.start_span(
+            meta.span_name,
+            kind=SpanKind.INTERNAL,
+            context=ctx,
+            start_time=meta.start_ns,
+        )
+        for k, v in meta.attrs.items():
+            span.set_attribute(k, v)
+
+        # Failure / skip handling ---------------------------------------
+        if status == "failed":
+            self._failed += 1
+            msg = res.get("msg") if isinstance(res, dict) else str(result._result)
+            span.record_exception(Exception(msg or "task failed"))
+            span.set_status(Status(StatusCode.ERROR))
+        elif status == "skipped":
+            span.set_status(Status(StatusCode.UNSET))
+        else:
+            span.set_status(Status(StatusCode.OK))
+        span.end()
+
+    # Runner hooks --------------------------------------------------------
+    def v2_runner_on_ok(self, result):  # noqa: N802
+        self._finish(result, "ok")
+
+    def v2_runner_on_failed(self, result, ignore_errors=False):  # noqa: N802
+        self._finish(result, "ignored" if ignore_errors else "failed")
+
+    def v2_runner_on_skipped(self, result):  # noqa: N802
+        self._finish(result, "skipped")
+
+    # Playbook end --------------------------------------------------------
+    def v2_playbook_on_stats(self, stats):  # noqa: N802
+        if not self.root_span:
+            return
+        if self._failed:
+            self.root_span.set_status(Status(StatusCode.ERROR, f"{self._failed} task(s) failed"))
+        else:
+            self.root_span.set_status(Status(StatusCode.OK))
+        self.root_span.end()
+        self._dbg("Root span ended – flushing exporter.")
+        if self.tracer_provider:
+            self.tracer_provider.force_flush()
+        self._dbg("Flush complete.")
