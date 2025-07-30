@@ -7,15 +7,15 @@
 
 Highlights
 ==========
-* **Native TLS** – uses the system trust store (`ssl.create_default_context()`), so
+* **Native TLS** – uses the system trust store (`ssl.create_default_context()`), so
   no custom CA bundle is required on RHEL / other Linux distros.
-* **OpenTelemetry Semantic Conventions** – attributes prefixed with `ansible.*`,
-  `host.*`, `code.*`, giving you rich service‑maps out‑of‑the‑box.
-* **Resilient config** – any unknown/typo option is ignored (with a warning)
+* **OpenTelemetry Semantic Conventions** – attributes prefixed with `ansible.*`,
+  `host.*`, `code.*`, giving you rich service‑maps out‑of‑the-box.
+* **Resilient config** – any unknown/typo option is ignored (with a warning)
   instead of breaking plugin loading.
 * **Fast & lightweight** – spans are batched with the default exporter limits;
   only a tiny in‑memory dict is used to stash task start times.
-* **Debug toggle** – set `ANSIBLE_SKYNET_DEBUG_LOGGING=true` (or the ini option)
+* **Debug toggle** – set `ANSIBLE_SKYNET_DEBUG_LOGGING=true` (or the ini option)
   to stream detailed state to the Ansible console.
 
 Add to `ansible.cfg`::
@@ -62,7 +62,7 @@ try:
     from opentelemetry.trace.status import Status, StatusCode
 
     _HAS_OTEL = True
-except ImportError as exc:  # pragma: no cover – runtime guard
+except ImportError as exc:  # pragma: no cover – runtime guard
     _HAS_OTEL = False
     _OTEL_IMPORT_ERROR = exc
 
@@ -97,18 +97,21 @@ options:
     ini:
       - section: callback_skynet_reporting
         key: neuron_team
-    env: [NEURON_TEAM]
+    env:
+      - name: NEURON_TEAM
   neuron_app:
     type: str
     description: Application being deployed (for service name).
     ini:
       - section: callback_skynet_reporting
         key: neuron_app
-    env: [NEURON_APP]
+    env:
+      - name: NEURON_APP
   traceparent:
     type: str
     description: W3C traceparent header to link with upstream trace.
-    env: [TRACEPARENT]
+    env:
+      - name: TRACEPARENT
   enable_debug_logging:
     type: bool
     default: false
@@ -116,7 +119,8 @@ options:
     ini:
       - section: callback_skynet_reporting
         key: enable_debug_logging
-    env: [ANSIBLE_SKYNET_DEBUG_LOGGING]
+    env:
+      - name: ANSIBLE_SKYNET_DEBUG_LOGGING
 """
 
 EXAMPLES = r"""
@@ -178,14 +182,12 @@ class _Config:
         return os.getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc").lower()
 
     @property
-        @property
     def team(self) -> str:
         return str(self._opt("neuron_team", "unknown_team"))
 
     @property
     def app(self) -> str:
-        return str(self._opt("neuron_app", "unknown_app"))(self) -> str:
-        return self._opt("neuron_app", "unknown_app")
+        return str(self._opt("neuron_app", "unknown_app"))
 
     @property
     def traceparent(self) -> Optional[str]:
@@ -296,7 +298,6 @@ class CallbackModule(CallbackBase):
             )
 
     # Internal helper to close spans ------------------------------------
-        # Internal helper to close spans ------------------------------------
     def _finish(self, result, status: str):
         if not self.root_span:
             return
@@ -340,15 +341,6 @@ class CallbackModule(CallbackBase):
 
     # Runner hooks --------------------------------------------------------
     def v2_runner_on_ok(self, result):  # noqa: N802
-        self._finish(result, "ok")
-
-    def v2_runner_on_failed(self, result, ignore_errors=False):  # noqa: N802
-        self._finish(result, "ignored" if ignore_errors else "failed")
-
-    def v2_runner_on_skipped(self, result):  # noqa: N802
-        self._finish(result, "skipped")
-
-(self, result):  # noqa: N802
         self._finish(result, "ok")
 
     def v2_runner_on_failed(self, result, ignore_errors=False):  # noqa: N802
