@@ -76,7 +76,7 @@ __all__ = ["CallbackModule"]
 #       config file → plugin.
 DOCUMENTATION = r"""
 callback: skynet_reporting
-short_description: High-signal OpenTelemetry traces for every Ansible task.
+short_description: High‑signal OpenTelemetry traces for every Ansible task.
 version_added: "1.0.0"
 author: Drew Mclachlan <drew@skynet.systems>
 description:
@@ -178,11 +178,13 @@ class _Config:
         return os.getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc").lower()
 
     @property
+        @property
     def team(self) -> str:
-        return self._opt("neuron_team", "unknown_team")
+        return str(self._opt("neuron_team", "unknown_team"))
 
     @property
     def app(self) -> str:
+        return str(self._opt("neuron_app", "unknown_app"))(self) -> str:
         return self._opt("neuron_app", "unknown_app")
 
     @property
@@ -294,6 +296,7 @@ class CallbackModule(CallbackBase):
             )
 
     # Internal helper to close spans ------------------------------------
+        # Internal helper to close spans ------------------------------------
     def _finish(self, result, status: str):
         if not self.root_span:
             return
@@ -303,16 +306,31 @@ class CallbackModule(CallbackBase):
         if not meta:  # shouldn’t happen but guard anyway
             meta = _TaskMeta(span_name=f"{task.get_name()} on {host.name}", start_ns=time_ns())
 
-        meta.attrs.update({"ansible.task.status": status, "ansible.result.changed": result._result.get("changed", False)})
+        # Safely interrogate `result._result`, which is *usually* a dict but can be
+        # a raw AnsibleUnicode/string for some callback events (e.g. include).
+        res = result._result if isinstance(result._result, dict) else {}
+        changed = bool(res.get("changed")) if isinstance(res, dict) else False
+
+        meta.attrs.update({
+            "ansible.task.status": status,
+            "ansible.result.changed": changed,
+        })
 
         ctx = trace.set_span_in_context(self.root_span)
-        span = self.tracer.start_span(meta.span_name, kind=SpanKind.INTERNAL, context=ctx, start_time=meta.start_ns)
+        span = self.tracer.start_span(
+            meta.span_name,
+            kind=SpanKind.INTERNAL,
+            context=ctx,
+            start_time=meta.start_ns,
+        )
         for k, v in meta.attrs.items():
             span.set_attribute(k, v)
 
+        # Failure / skip handling ---------------------------------------
         if status == "failed":
             self._failed += 1
-            span.record_exception(Exception(result._result.get("msg", "task failed")))
+            msg = res.get("msg") if isinstance(res, dict) else str(result._result)
+            span.record_exception(Exception(msg or "task failed"))
             span.set_status(Status(StatusCode.ERROR))
         elif status == "skipped":
             span.set_status(Status(StatusCode.UNSET))
@@ -322,6 +340,15 @@ class CallbackModule(CallbackBase):
 
     # Runner hooks --------------------------------------------------------
     def v2_runner_on_ok(self, result):  # noqa: N802
+        self._finish(result, "ok")
+
+    def v2_runner_on_failed(self, result, ignore_errors=False):  # noqa: N802
+        self._finish(result, "ignored" if ignore_errors else "failed")
+
+    def v2_runner_on_skipped(self, result):  # noqa: N802
+        self._finish(result, "skipped")
+
+(self, result):  # noqa: N802
         self._finish(result, "ok")
 
     def v2_runner_on_failed(self, result, ignore_errors=False):  # noqa: N802
