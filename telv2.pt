@@ -69,6 +69,70 @@ except ImportError as exc:  # pragma: no cover – runtime guard
 __all__ = ["CallbackModule"]
 
 # ---------------------------------------------------------------------------
+# Mandatory Ansible metadata (DOCUMENTATION / EXAMPLES)
+# ---------------------------------------------------------------------------
+# NOTE: Options declared here are what make `get_option()` work. If an option
+#       is missing from this YAML block Ansible **will not pass it** from the
+#       config file → plugin.
+DOCUMENTATION = r"""
+callback: skynet_reporting
+short_description: High-signal OpenTelemetry traces for every Ansible task.
+version_added: "1.0.0"
+author: Drew Mclachlan <drew@skynet.systems>
+description:
+  - Sends one span per task per host to an OTLP collector using the system CA
+    trust store (gRPC or HTTP/Protobuf).
+options:
+  endpoint:
+    type: str
+    description: OTLP collector endpoint (e.g. C(https://otel.internal:4317)).
+    ini:
+      - section: callback_skynet_reporting
+        key: endpoint
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+  neuron_team:
+    type: str
+    description: Team responsible for the run (for service name).
+    ini:
+      - section: callback_skynet_reporting
+        key: neuron_team
+    env: [NEURON_TEAM]
+  neuron_app:
+    type: str
+    description: Application being deployed (for service name).
+    ini:
+      - section: callback_skynet_reporting
+        key: neuron_app
+    env: [NEURON_APP]
+  traceparent:
+    type: str
+    description: W3C traceparent header to link with upstream trace.
+    env: [TRACEPARENT]
+  enable_debug_logging:
+    type: bool
+    default: false
+    description: Emit verbose plugin logs (requires -vv or higher).
+    ini:
+      - section: callback_skynet_reporting
+        key: enable_debug_logging
+    env: [ANSIBLE_SKYNET_DEBUG_LOGGING]
+"""
+
+EXAMPLES = r"""
+# ansible.cfg
+[defaults]
+callbacks_enabled = skynet_reporting
+callback_plugins  = ./callback_plugins
+
+[callback_skynet_reporting]
+endpoint = https://otel.internal:4317
+neuron_team = trading
+neuron_app  = fx-pricing
+enable_debug_logging = true
+"""
+
+# ---------------------------------------------------------------------------
 # Helper dataclasses
 # ---------------------------------------------------------------------------
 @dataclass
