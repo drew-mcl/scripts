@@ -1,60 +1,54 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2021, Victor Martinez <VictorMartinezRubio@gmail.com>
-# Copyright (c) 2025, Refactored for Simplicity and Customization
+# Copyright (c) 2025, Sky Net Reporting
 # GNU General Public License v3.0+ (see LICENSES/GPL-3.0-or-later.txt or https://www.gnu.org/licenses/gpl-3.0.txt)
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from __future__ import annotations
 
 DOCUMENTATION = r"""
-author: Victor Martinez (@v1v), Refactored by Gemini
-name: opentelemetry
+author: Sky Net Systems
+name: skynet_reporting
 type: notification
-short_description: Create detailed, customizable distributed traces with OpenTelemetry
-version_added: 3.7.0
+short_description: Create detailed, best-practice traces for Ansible runs via OpenTelemetry.
+version_added: 1.0.0
 description:
-  - This callback creates a distinct span for each task on each host, allowing for detailed performance analysis.
-  - It is configured via standard OpenTelemetry environment variables and can be customized heavily in ansible.cfg.
+  - This callback creates a distinct span for each task on each host, using a curated set of attributes
+    based on OpenTelemetry semantic conventions for clear and immediate observability.
   - It automatically uses the system's CA trust store for secure OTLP/gRPC communication.
 options:
-  otel_service_name:
-    default: ansible
+  endpoint:
     type: str
-    description: The service name resource attribute for the trace.
-    env: [OTEL_SERVICE_NAME]
+    description: The OTLP endpoint (e.g., "https://collector.internal:4317").
+    env: [OTEL_EXPORTER_OTLP_ENDPOINT]
     ini:
-      - section: callback_opentelemetry
-        key: otel_service_name
+      - section: callback_skynet_reporting
+        key: endpoint
+  neuron_team:
+    type: str
+    description: The team responsible for this playbook run, used for service naming.
+    env: [NEURON_TEAM]
+    ini:
+      - section: callback_skynet_reporting
+        key: neuron_team
+  neuron_app:
+    type: str
+    description: The application this playbook targets, used for service naming.
+    env: [NEURON_APP]
+    ini:
+      - section: callback_skynet_reporting
+        key: neuron_app
   traceparent:
     type: str
-    description: The W3C Trace Context header (traceparent) to continue a trace from a parent process.
+    description: The W3C Trace Context header (traceparent) to link this playbook run to a parent trace.
     env: [TRACEPARENT]
-  hide_task_arguments:
-    default: false
-    type: bool
-    description: Hide task arguments from span attributes (if not overridden by `span_attributes`).
-    env: [ANSIBLE_OPENTELEMETRY_HIDE_TASK_ARGUMENTS]
-    ini:
-      - section: callback_opentelemetry
-        key: hide_task_arguments
   enable_debug_logging:
     default: false
     type: bool
     description: Enable verbose logging to the Ansible console for debugging the callback itself.
-    env: [ANSIBLE_OPENTELEMETRY_DEBUG_LOGGING]
+    env: [ANSIBLE_SKYNET_DEBUG_LOGGING]
     ini:
-      - section: callback_opentelemetry
+      - section: callback_skynet_reporting
         key: enable_debug_logging
-  span_attributes:
-    type: dict
-    description:
-      - A dictionary mapping desired span attribute names to data paths within the Ansible `result` object.
-      - This gives you full control over the "schema" of your trace data.
-      - Paths are dot-separated strings like `_host.name` or `_result.rc`.
-      - If an attribute path is invalid for a given task, it will be silently ignored.
-    ini:
-      - section: callback_opentelemetry
-        key: span_attributes
 requirements:
   - opentelemetry-api
   - opentelemetry-sdk
@@ -65,35 +59,25 @@ requirements:
 EXAMPLES = r"""
 # --- ansible.cfg ---
 [defaults]
-callbacks_enabled = community.general.opentelemetry
+# The path must match where you place the skynet_reporting.py file
+callback_plugins   = /path/to/callback_plugins
+callbacks_enabled = skynet_reporting
 
-[callback_opentelemetry]
-# Enable debug logging for the callback itself
+[callback_skynet_reporting]
+# Configure the connection and metadata directly in the config
+endpoint = https://collector.internal:4317
+neuron_team = teamA
+neuron_app = appZ
 enable_debug_logging = true
 
-# Define a custom schema for your spans
-span_attributes = {
-  "host.name": "_host.name",
-  "task.name": "_task.name",
-  "task.module": "_task.action",
-  "task.path": "_task.path",
-  "task.status": "_result.task_status",
-  "result.changed": "_result.changed",
-  "result.failed": "_result.failed",
-  "result.rc": "_result.rc",
-  "result.stdout": "_result.stdout"
-}
-
-
 # --- Environment Variables ---
-# Configure the OTLP exporter. This will use the system's CA trust store by default.
-export OTEL_EXPORTER_OTLP_ENDPOINT="https://my-collector.internal:4317"
-export OTEL_SERVICE_NAME="my-ansible-automation"
+# To link this run to an orchestrator's trace, set the TRACEPARENT.
+# Your orchestrator (e.g., Jenkins, another Ansible playbook) would generate this.
+export TRACEPARENT="00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 """
 
 import os
 import ssl
-from functools import reduce
 from os.path import basename
 
 from ansible.errors import AnsibleError
@@ -119,58 +103,62 @@ except ImportError as e:
 class CallbackModule(CallbackBase):
     CALLBACK_VERSION = 2.0
     CALLBACK_TYPE = 'notification'
-    CALLBACK_NAME = 'community.general.opentelemetry'
+    CALLBACK_NAME = 'skynet_reporting' # Updated name
     CALLBACK_NEEDS_ENABLED = True
 
     def __init__(self, display=None):
         super(CallbackModule, self).__init__(display=display)
         if not HAS_OTEL:
-            raise AnsibleError(f'The opentelemetry libraries must be installed to use this plugin. Error: {OTEL_IMPORT_ERROR}')
+            raise AnsibleError(f'The opentelemetry libraries must be installed. Error: {OTEL_IMPORT_ERROR}')
 
         self.tracer = None
         self.tracer_provider = None
         self.playbook_span = None
         self.errors_in_playbook = 0
         self.debug_enabled = False
-        self.custom_attributes = {}
 
     def _debug(self, msg):
         if self.debug_enabled:
-            self._display.v(f"[opentelemetry callback] {msg}")
+            self._display.v(f"[{self.CALLBACK_NAME}] {msg}")
 
     def set_options(self, task_keys=None, var_options=None, direct=None):
         super(CallbackModule, self).set_options(task_keys, var_options, direct)
         self.debug_enabled = self.get_option('enable_debug_logging')
-        self.custom_attributes = self.get_option('span_attributes') or {}
         self._debug("Options loaded.")
-        if self.custom_attributes:
-            self._debug(f"Custom span attributes configured: {self.custom_attributes}")
 
     def _init_otel(self):
-        if self.tracer:
-            return
-        self._debug("Initializing OpenTelemetry SDK...")
-        resource = Resource.create({SERVICE_NAME: self.get_option('otel_service_name')})
+        if self.tracer: return
+
+        team = self.get_option('neuron_team') or "unknown_team"
+        app = self.get_option('neuron_app') or "unknown_app"
+        service_name = f"ansible.skynet.{team}.{app}"
+
+        self._debug(f"Initializing OpenTelemetry SDK for service: {service_name}")
+        resource = Resource.create({SERVICE_NAME: service_name})
         self.tracer_provider = TracerProvider(resource=resource)
         protocol = os.getenv('OTEL_EXPORTER_OTLP_TRACES_PROTOCOL', 'grpc')
-        self._debug(f"Using OTLP protocol: {protocol}")
+        endpoint = self.get_option('endpoint')
 
+        if not endpoint:
+            self._display.warning("OTLP endpoint is not set. Traces will not be sent.")
+            return
+
+        self._debug(f"Using OTLP protocol: {protocol} with endpoint: {endpoint}")
         exporter = None
         if protocol == 'grpc':
-            self._debug("Configuring gRPC exporter to use system default CA trust store.")
             credentials = ssl.create_default_context()
-            exporter = GRPCSpanExporter(credentials=credentials)
+            exporter = GRPCSpanExporter(endpoint=endpoint, credentials=credentials)
         elif protocol == 'http/protobuf':
-            exporter = HTTPSpanExporter()
+            exporter = HTTPSpanExporter(endpoint=endpoint)
 
         if exporter:
             processor = BatchSpanProcessor(exporter)
             self.tracer_provider.add_span_processor(processor)
             trace.set_tracer_provider(self.tracer_provider)
-            self.tracer = trace.get_tracer("ansible.opentelemetry.callback", ansible_version)
+            self.tracer = trace.get_tracer(self.CALLBACK_NAME, ansible_version)
             self._debug("Tracer initialized successfully.")
         else:
-            self._display.warning("No valid OTLP exporter configured. Traces will not be sent.")
+            self._display.warning(f"Protocol '{protocol}' not supported. Traces will not be sent.")
 
     def v2_playbook_on_start(self, playbook):
         self._init_otel()
@@ -182,20 +170,12 @@ class CallbackModule(CallbackBase):
         parent_context = TraceContextTextMapPropagator().extract({'traceparent': traceparent}) if traceparent else None
 
         self.playbook_span = self.tracer.start_span(
-            name=f"playbook: {playbook_name}",
-            kind=SpanKind.SERVER,
-            context=parent_context,
+            name=f"playbook: {playbook_name}", kind=SpanKind.SERVER, context=parent_context
         )
         self.playbook_span.set_attribute("ansible.playbook.name", playbook_name)
+        self.playbook_span.set_attribute("neuron.team", self.get_option('neuron_team'))
+        self.playbook_span.set_attribute("neuron.app", self.get_option('neuron_app'))
         self.playbook_span.set_attribute("ansible.version", ansible_version)
-
-    def _get_path_from_obj(self, obj, path):
-        """Safely gets a value from a nested object using a dot-separated path."""
-        try:
-            return reduce(getattr, path.split('.'), obj)
-        except AttributeError:
-            self._debug(f"Could not find path '{path}' in result object. Skipping attribute.")
-            return None
 
     def _create_task_result_span(self, result, status_string: str):
         if not self.playbook_span: return
@@ -208,21 +188,20 @@ class CallbackModule(CallbackBase):
         parent_context = trace.set_span_in_context(self.playbook_span)
         span = self.tracer.start_span(name=span_name, context=parent_context)
 
-        # Inject task status into the result object so it can be mapped by custom attributes
-        result._result['task_status'] = status_string
+        # -- Curated "Best Practice" Attributes --
+        span.set_attribute("host.name", host.get_name())
+        span.set_attribute("code.function", task.action)
+        span.set_attribute("code.filepath", task.get_path())
+        span.set_attribute("ansible.task.name", task.get_name())
+        span.set_attribute("ansible.task.status", status_string)
+        if 'changed' in result._result:
+            span.set_attribute("ansible.result.changed", result._result['changed'])
 
-        # Populate attributes based on the custom mapping in ansible.cfg
-        for attr_name, attr_path in self.custom_attributes.items():
-            value = self._get_path_from_obj(result, attr_path)
-            if value is not None:
-                # OTel attributes can't be complex types, so convert to string.
-                span.set_attribute(attr_name, str(value))
-        
-        # Determine status code and record errors
         status_code = StatusCode.OK
         if status_string == "failed":
             self.errors_in_playbook += 1
             status_code = StatusCode.ERROR
+            span.set_attribute("error", True)
             msg = result._result.get('msg', 'Task failed without a specific message.')
             span.record_exception(Exception(msg))
 
@@ -233,8 +212,7 @@ class CallbackModule(CallbackBase):
         self._create_task_result_span(result, "ok")
 
     def v2_runner_on_failed(self, result, ignore_errors=False):
-        status = "ignored" if ignore_errors else "failed"
-        self._create_task_result_span(result, status)
+        self._create_task_result_span(result, "ignored" if ignore_errors else "failed")
 
     def v2_runner_on_skipped(self, result):
         self._create_task_result_span(result, "skipped")
@@ -252,4 +230,3 @@ class CallbackModule(CallbackBase):
         self._debug("Forcing flush of all spans before exit.")
         self.tracer_provider.force_flush()
         self._debug("Flush complete.")
-        
