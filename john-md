@@ -1,0 +1,69 @@
+topology Package
+This package parses a YAML file describing a complex application topology and builds a concrete, validated dependency graph. It is designed to be the single source of truth for service orchestration, deployment, and visualization.
+
+The core architectural pattern is based on blueprints, which are reusable templates for common application stacks.
+
+YAML Grammar
+The topology is defined by four top-level keys: version, shards, blueprints, and apps.
+
+1. blueprints
+
+A blueprint defines a reusable set of co-located applications and their internal dependencies.
+
+blueprints:
+  # Defines a reusable "faxer-stack"
+  faxer-stack:
+    apps:
+      # This app will be instantiated as <parent>-receiver
+      receiver:
+        # It depends on another app within the same blueprint.
+        depends_on: [muse]
+        # It also declares a dependency on an external service
+        # named 'sender', which must be provided by the parent app.
+        external_depends_on: [sender]
+
+      # This app will be instantiated as <parent>-muse
+      muse: {}
+
+2. apps
+
+This section defines the primary, top-level applications in your system. An app can be standalone or can instantiate blueprints using the uses keyword.
+
+apps:
+  # A standalone application
+  watchdog: {}
+
+  # An application that instantiates a blueprint
+  sor:
+    # This will create 8 instances of sor and all its blueprint components
+    shards: 8
+    uses:
+      - blueprint: faxer-stack
+        # The 'with' clause maps the blueprint's external dependency
+        # 'sender' to the real, global 'faxer-sender' service.
+        with:
+          sender: faxer-sender
+
+  # The service that fulfills the external dependency
+  faxer-sender:
+    shards: 8
+
+3. Dependency Types
+
+Dependencies define the startup order. There are two main types:
+
+depends_on: For 1-to-1 or N-to-1 relationships.
+
+If sor (8 shards) depends_on: [db] (1 shard), all 8 sor instances will wait for the single db to be ready.
+
+If sor (8 shards) depends_on: [faxer-sender] (8 shards), then sor-01 will wait for faxer-sender-01, sor-02 for faxer-sender-02, and so on.
+
+depends_on_all_of: For "fan-in" or "barrier" dependencies.
+
+If bog (2 shards) depends_on_all_of: [sor] (8 shards), both bog-00 and bog-01 will wait for all 8 sor shards to be ready before starting.
+
+4. Co-location and Sharding
+
+Co-location is automatic. When an app uses a blueprint, all components of that blueprint are automatically co-located with the parent app. You can also use same_host_as for top-level apps.
+
+Sharding is implicit. Shard counts are inherited. When sor (8 shards) uses the faxer-stack, the sor-receiver and sor-muse components are automatically sharded 8 times as well. You only need to define the shard count once on the parent application.

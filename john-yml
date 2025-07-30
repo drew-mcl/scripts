@@ -1,0 +1,95 @@
+version: 1
+
+# ===================================================================
+# SHARDS
+# Define shard counts ONLY for top-level, primary applications.
+# Shard counts for components used in blueprints are inferred automatically.
+# ===================================================================
+shards:
+  sor: 8
+  bbok: 8
+  bog: 4
+  # These are standalone services that fulfill external dependencies.
+  sor-private-sender: 8
+  shared-faxer-sender: 8
+  multicast-refdata-sender: 1
+
+
+# ===================================================================
+# BLUEPRINTS
+# Define reusable, co-located stacks of applications. These are templates.
+# ===================================================================
+blueprints:
+  # A simple monitoring component.
+  muse-stack:
+    apps:
+      muse: {}
+
+  # A component for receiving faxes. It has an external dependency.
+  faxer-stack:
+    apps:
+      faxer-receiver:
+        # This blueprint requires its parent to provide a 'sender'.
+        external_depends_on: [sender]
+  
+  # A component for populating refdata.
+  refdata-stack:
+    apps:
+      refdata-populator:
+        external_depends_on_all_of: [refdata-source]
+
+
+# ===================================================================
+# APPS
+# Define the primary, top-level applications in the system.
+# This section is about INSTANTIATING blueprints and defining dependencies.
+# ===================================================================
+apps:
+  # The main SOR application.
+  sor:
+    uses:
+      # sor uses a muse stack and has a startup dependency on it.
+      - blueprint: muse-stack
+        depends_on: true
+      
+      # sor also uses a faxer stack.
+      - blueprint: faxer-stack
+        depends_on: true
+        with:
+          sender: sor-private-sender
+          
+    # sor also has a direct dependency on the standalone watchdog.
+    depends_on: [watchdog]
+
+  # The main BBOK application.
+  bbok:
+    uses:
+      # bbok uses its own, separate muse stack.
+      - blueprint: muse-stack
+        depends_on: true
+        
+      # bbok uses a faxer stack wired to a different sender.
+      - blueprint: faxer-stack
+        depends_on: true
+        with:
+          sender: shared-faxer-sender
+          
+      # bbok also uses a refdata stack.
+      - blueprint: refdata-stack
+        depends_on: true
+        with:
+          refdata-source: multicast-refdata-sender
+
+  # The BOG application, which has a fan-in dependency on the entire BBOK fleet.
+  bog:
+    # This means "do not start any 'bog' instance until ALL 8 'bbok'
+    # instances and their co-located components are running".
+    depends_on_all_of: [bbok]
+
+  # The standalone watchdog service (a singleton).
+  watchdog: {}
+
+  # The actual services that fulfill the external dependencies from the blueprints.
+  sor-private-sender: {}
+  shared-faxer-sender: {}
+  multicast-refdata-sender: {}
