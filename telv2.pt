@@ -306,6 +306,11 @@ class CallbackModule(CallbackBase):
     def v2_playbook_on_task_start(self, task, is_conditional):  # noqa: N802
         if not self.root_span:
             return
+        
+        # Guard against meta-tasks that have no hosts.
+        if not getattr(task, '_hosts', None):
+            self._dbg(f"Skipping task with no hosts: {task.get_name()}")
+            return
             
         for host in task._hosts:
             key = _TaskKey(task._uuid, host._uuid)
@@ -322,7 +327,7 @@ class CallbackModule(CallbackBase):
 
     # Internal helper to close spans ------------------------------------
     def _finish(self, result, status: str):
-        # Guard against meta-tasks that don't have a host
+        # Guard against meta-tasks that don't have a host.
         if not self.root_span or not getattr(result, '_host', None):
             return
             
