@@ -3,17 +3,17 @@
 # GNU General Public License v3.0+ (see LICENSES/GPL-3.0-or-later.txt or https://www.gnu.org/licenses/gpl-3.0.txt)
 # SPDX-License-Identifier: GPL-3.0-or-later
 """
-Modern, production-ready OpenTelemetry callback plugin for Ansible.
+Modern, production‑ready OpenTelemetry callback plugin for Ansible.
 Highlights
 ----------
-* **Zero-config TLS** – uses the native system trust store on RHEL (and other Linux
+* **Zero‑config TLS** – uses the native system trust store on RHEL (and other Linux
   distros) for secure gRPC or HTTP/Protobuf export without bundling custom CAs.
 * **Semantic attributes** – aligns with OpenTelemetry Semantic Conventions
-  (`ansible.*`, `net.*`, `code.*`, etc.) for out-of-the-box service maps and
+  (`ansible.*`, `net.*`, `code.*`, etc.) for out‑of‑the‑box service maps and
   dashboards.
-* **Minimal runtime overhead** – batch exporter with default span limits and a
-  fast, in-memory task cache.
-* **Opt-in verbosity** – toggle rich console debug messages via
+* **Minimal runtime overhead** – batch exporter with default span limits and a
+  fast, in‑memory task cache.
+* **Opt‑in verbosity** – toggle rich console debug messages via
   `ANSIBLE_SKYNET_DEBUG_LOGGING=true`.
 
 Drop the file into any directory listed in `callback_plugins` and enable it via
@@ -50,7 +50,7 @@ try:
     )
 
     _HAS_OTEL = True
-except ImportError as exc:  # pragma: no cover – handled at runtime
+except ImportError as exc:  # pragma: no cover – handled at runtime
     _HAS_OTEL = False
     _OTEL_IMPORT_ERROR = exc
 
@@ -63,7 +63,7 @@ __all__ = ["CallbackModule"]
 # ---------------------------------------------------------------------------
 @dataclass
 class _TaskKey:
-    """Composite key to uniquely identify host-task pair."""
+    """Composite key to uniquely identify host‑task pair."""
 
     task_uuid: str
     host_uuid: str
@@ -80,9 +80,56 @@ class _TaskMetadata:
 
 
 class _Config:
-    """Resolves option precedence (Ansible ini -> env vars -> defaults)."""
+    """Resolves option precedence (Ansible ini → env vars → defaults) with
+    defensive fall-backs so unknown/typo keys never break plugin loading.
+    """
 
     def __init__(self, callback: "CallbackModule"):
+        self._cb = callback
+
+    # ------------------------------------------------------------------
+    # Generic accessor with KeyError guard
+    # ------------------------------------------------------------------
+    def opt(self, key: str, default: Any = None) -> Any:
+        """Return option *key* if defined, else *default*.
+
+        Using ``get_option`` directly can raise ``KeyError`` when the user
+        supplies a value that isn't declared in ``DOCUMENTATION``. We swallow
+        that error here so the plugin still loads (we'll surface a warning
+        later).
+        """
+        try:
+            val = self._cb.get_option(key)
+        except Exception:  # KeyError or AnsibleOptionError depending on version
+            return default
+        return val if val is not None else default
+
+    # Convenience wrappers ---------------------------------------------------
+    @property
+    def endpoint(self) -> Optional[str]:
+        return self.opt("endpoint") or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+
+    @property
+    def protocol(self) -> str:
+        return os.getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc").lower()
+
+    @property
+    def team(self) -> str:
+        return self.opt("neuron_team", "unknown_team")
+
+    @property
+    def app(self) -> str:
+        return self.opt("neuron_app", "unknown_app")
+
+    @property
+    def traceparent(self) -> Optional[str]:
+        return self.opt("traceparent")
+
+    @property
+    def debug(self) -> bool:
+        env_debug = os.getenv("ANSIBLE_SKYNET_DEBUG_LOGGING", "false").lower() == "true"
+        # Normalise to bool in case .ini sets it as string
+        return bool(str(self.opt("enable_debug_logging", env_debug)).lower() == "true")(self, callback: "CallbackModule"):
         self._cb = callback
 
     def opt(self, key: str, default: Any = None) -> Any:
@@ -218,7 +265,7 @@ class CallbackModule(CallbackBase):
     def v2_playbook_on_task_start(self, task, is_conditional):  # noqa: N802
         if not self.root_span:
             return
-        # Cache start time – we finalise when per-host results arrive.
+        # Cache start time – we finalise when per‑host results arrive.
         for host in task._hosts:
             key = _TaskKey(task_uuid=task._uuid, host_uuid=host._uuid)
             self._pending[key] = _TaskMetadata(
@@ -239,7 +286,7 @@ class CallbackModule(CallbackBase):
         key = _TaskKey(task_uuid=task._uuid, host_uuid=host._uuid)
         meta = self._pending.pop(key, None)
         if meta is None:
-            # Fallback – shouldn't happen, but guard against KeyError
+            # Fallback – shouldn't happen, but guard against KeyError
             meta = _TaskMetadata(span_name=f"{task.get_name()} on {host.name}", start_ns=time_ns())
         meta.attributes.update(
             {
