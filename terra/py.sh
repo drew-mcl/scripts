@@ -105,7 +105,7 @@ def load_settings(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str]
 
 def add_module_to_settings(lines: List[str], artifact: str, path_rel: str):
     include_line = f'include(":{artifact}")'
-    # Use relative path from root for projectDir in monorepo
+    # Use the same path for projectDir as the include
     dir_line = f'project(":{artifact}").projectDir = file("{path_rel}")'
     lines.extend([include_line, dir_line])
 
@@ -132,7 +132,7 @@ def load_root_properties(repo_root: pathlib.Path) -> Dict[str, str]:
 # Version catalog helpers
 # --------------------------------------------------------------------------------------
 
-def load_catalog(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str], List[str]]:
+def load_catalog(repo_root: pathlib.Path, debug: bool = False) -> Tuple[pathlib.Path, Dict[str, str], List[str]]:
     catalog = repo_root / "gradle" / "libs.versions.toml"
     catalog.parent.mkdir(parents=True, exist_ok=True)
     if not catalog.exists():
@@ -140,6 +140,10 @@ def load_catalog(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str],
     raw_lines = catalog.read_text(encoding="utf-8").splitlines()
     data = tomllib.loads("\n".join(raw_lines))
     mapping = {}
+    if debug:
+        print(f"DEBUG: Loading catalog from {catalog}")
+        print(f"DEBUG: Found libraries: {list(data.get('libraries', {}).keys())}")
+    
     for alias, entry in data.get("libraries", {}).items():
         if isinstance(entry, dict) and "module" in entry:
             module = entry["module"]
@@ -147,6 +151,12 @@ def load_catalog(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str],
             # Handle old format for backward compatibility
             module = ":".join(entry.split(":")[:2]) if isinstance(entry, str) else ""
         mapping[module] = alias
+        if debug:
+            print(f"DEBUG: Mapped {module} -> {alias}")
+    
+    if debug:
+        print(f"DEBUG: Total mappings: {len(mapping)}")
+    
     return catalog, mapping, raw_lines
 
 
@@ -229,17 +239,25 @@ def parse_pom(path: pathlib.Path, root_props: Dict[str, str]) -> PomInfo:
 # Dependency translation
 # --------------------------------------------------------------------------------------
 
-def gradle_line(dep: Dependency, mod_map: Dict[str, str], cat_lines: List[str], settings_map: Dict[str, str], current_module_name: str) -> Tuple[str, str]:
+def gradle_line(dep: Dependency, mod_map: Dict[str, str], cat_lines: List[str], settings_map: Dict[str, str], current_module_name: str, debug: bool = False) -> Tuple[str, str]:
     conf = ScopeMapping.get(dep.scope, "implementation")
 
     # Internal module → project dependency
     if dep.group.startswith(INTERNAL_PREFIX):
         # Try to find the module in settings_map, fallback to simple artifact name
         path = settings_map.get(dep.artifact, f":{dep.artifact}")
+        if debug:
+            print(f"DEBUG: Internal dependency {dep.artifact} -> {path}")
         return conf, f"project(\"{path}\")"
 
     module = dep.module_notation()
+    if debug:
+        print(f"DEBUG: Looking for module {module} in catalog")
+        print(f"DEBUG: Available modules: {list(mod_map.keys())}")
+    
     if module in mod_map:
+        if debug:
+            print(f"DEBUG: Found {module} -> {mod_map[module]}")
         return conf, f"libs.{mod_map[module]}"
 
     if dep.version is None:
@@ -247,16 +265,18 @@ def gradle_line(dep: Dependency, mod_map: Dict[str, str], cat_lines: List[str], 
         raise ValueError(f"Missing version and not found in catalog for {module}")
 
     alias = normalise_alias(dep.artifact, mod_map)
+    if debug:
+        print(f"DEBUG: Adding new dependency {module} -> {alias}")
     append_library(cat_lines, alias, dep)
     mod_map[module] = alias
     return conf, f"libs.{alias}"
 
 
-def build_script(info: PomInfo, mod_map: Dict[str, str], cat_lines: List[str], settings_map: Dict[str, str], module_name: str) -> str:
+def build_script(info: PomInfo, mod_map: Dict[str, str], cat_lines: List[str], settings_map: Dict[str, str], module_name: str, debug: bool = False) -> str:
     buckets: Dict[str, List[str]] = {}
     for dep in info.dependencies:
         try:
-            conf, line = gradle_line(dep, mod_map, cat_lines, settings_map, module_name)
+            conf, line = gradle_line(dep, mod_map, cat_lines, settings_map, module_name, debug)
         except ValueError as err:
             print(f"WARN  {info.artifact}: {err}")
             continue
@@ -283,13 +303,14 @@ def build_script(info: PomInfo, mod_map: Dict[str, str], cat_lines: List[str], s
 # Main orchestration
 # --------------------------------------------------------------------------------------
 
-def process(repo: pathlib.Path, recursive: bool, dry: bool, overwrite: bool):
+def process(repo: pathlib.Path, recursive: bool, dry: bool, overwrite: bool, debug: bool = False, cleanup: bool = False):
     # Always use root repo for catalog and settings
-    catalog_path, mod_map, cat_lines = load_catalog(repo)
+    catalog_path, mod_map, cat_lines = load_catalog(repo, debug)
     settings_path, settings_map, settings_lines = load_settings(repo)
     root_props = load_root_properties(repo)
 
     new_module_lines: List[str] = []
+    processed_poms: List[pathlib.Path] = []
 
     for pom in find_poms(repo, recursive):
         if is_aggregator(pom, repo):
@@ -313,7 +334,7 @@ def process(repo: pathlib.Path, recursive: bool, dry: bool, overwrite: bool):
             new_module_lines.append(f'include(":{module_name}")')
             new_module_lines.append(f'project(":{module_name}").projectDir = file("{rel_path}")')
 
-        script_text = build_script(info, mod_map, cat_lines, settings_map, module_name)
+        script_text = build_script(info, mod_map, cat_lines, settings_map, module_name, debug)
         out_file = pom.parent / "build.gradle.kts"
         if out_file.exists() and not overwrite:
             print(f"SKIP  {out_file.relative_to(repo)} (exists)")
@@ -323,6 +344,13 @@ def process(repo: pathlib.Path, recursive: bool, dry: bool, overwrite: bool):
             else:
                 out_file.write_text(script_text, encoding="utf-8")
                 print(f"WRITE {out_file.relative_to(repo)}")
+                processed_poms.append(pom)
+
+    # Cleanup POM files if requested
+    if cleanup and not dry:
+        for pom in processed_poms:
+            pom.unlink()
+            print(f"DELETE {pom.relative_to(repo)}")
 
     # Flush catalog & settings updates
     if dry:
@@ -339,22 +367,110 @@ def process(repo: pathlib.Path, recursive: bool, dry: bool, overwrite: bool):
         print(f"UPDATED {catalog_path.relative_to(repo)}")
 
 # --------------------------------------------------------------------------------------
+# Subdirectory processing
+# --------------------------------------------------------------------------------------
+
+def process_subdirectory(root_repo: pathlib.Path, target_path: pathlib.Path, recursive: bool, dry: bool, overwrite: bool, debug: bool = False, cleanup: bool = False):
+    """Process a subdirectory within the root repo context."""
+    catalog_path, mod_map, cat_lines = load_catalog(root_repo, debug)
+    settings_path, settings_map, settings_lines = load_settings(root_repo)
+    root_props = load_root_properties(root_repo)
+
+    new_module_lines: List[str] = []
+    processed_poms: List[pathlib.Path] = []
+
+    for pom in find_poms(target_path, recursive):
+        if is_aggregator(pom, root_repo):
+            continue
+        info = parse_pom(pom, root_props)
+
+        # Calculate module name for monorepo structure
+        # Use the subdirectory name as prefix
+        rel_to_root = pom.parent.relative_to(root_repo)
+        if rel_to_root == pathlib.Path("."):
+            module_name = info.artifact
+        else:
+            # For monorepo: use subdirectory as prefix
+            module_name = f"{rel_to_root.parts[0]}:{info.artifact}"
+        
+        # ensure current module is in settings (internal project itself)
+        if info.group.startswith(INTERNAL_PREFIX) and module_name not in settings_map:
+            rel_path = pom.parent.relative_to(root_repo).as_posix()
+            add_module_to_settings(settings_lines, module_name, rel_path)
+            settings_map[module_name] = f":{module_name}"
+            new_module_lines.append(f'include(":{module_name}")')
+            new_module_lines.append(f'project(":{module_name}").projectDir = file("{rel_path}")')
+
+        script_text = build_script(info, mod_map, cat_lines, settings_map, module_name, debug)
+        out_file = pom.parent / "build.gradle.kts"
+        if out_file.exists() and not overwrite:
+            print(f"SKIP  {out_file.relative_to(root_repo)} (exists)")
+        else:
+            if dry:
+                print(f"----- {out_file.relative_to(root_repo)} -----\n{script_text}\n")
+            else:
+                out_file.write_text(script_text, encoding="utf-8")
+                print(f"WRITE {out_file.relative_to(root_repo)}")
+                processed_poms.append(pom)
+
+    # Cleanup POM files if requested
+    if cleanup and not dry:
+        for pom in processed_poms:
+            pom.unlink()
+            print(f"DELETE {pom.relative_to(root_repo)}")
+
+    # Flush catalog & settings updates
+    if dry:
+        if new_module_lines:
+            print("----- settings.gradle.kts additions -----")
+            for l in new_module_lines:
+                print(l)
+            print()
+    else:
+        catalog_path.write_text("\n".join(cat_lines) + "\n", encoding="utf-8")
+        if new_module_lines:
+            settings_path.write_text("\n".join(settings_lines) + "\n", encoding="utf-8")
+            print(f"UPDATED {settings_path.relative_to(root_repo)}")
+        print(f"UPDATED {catalog_path.relative_to(root_repo)}")
+
+# --------------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------------
 
 def main():
     p = argparse.ArgumentParser(description="Convert Maven POMs → Gradle, sync catalog & settings.")
-    p.add_argument("path", type=pathlib.Path, help="Repo root")
+    p.add_argument("path", type=pathlib.Path, help="Repo root or subdirectory")
     p.add_argument("-r", "--recursive", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    p.add_argument("--cleanup", action="store_true", help="Remove POM files after conversion")
     args = p.parse_args()
 
-    root = args.path.expanduser().resolve()
-    if not root.exists():
-        p.error(f"Path {root} does not exist")
+    target_path = args.path.expanduser().resolve()
+    if not target_path.exists():
+        p.error(f"Path {target_path} does not exist")
 
-    process(root, args.recursive, args.dry_run, args.overwrite)
+    # If target_path is a subdirectory, we need to find the root repo
+    # Look for gradle/libs.versions.toml to identify the root
+    current = target_path
+    root_repo = None
+    
+    while current != current.parent:
+        if (current / "gradle" / "libs.versions.toml").exists():
+            root_repo = current
+            break
+        current = current.parent
+    
+    if root_repo is None:
+        p.error("Could not find gradle/libs.versions.toml in any parent directory")
+    
+    # If target_path is the root, use it directly
+    if target_path == root_repo:
+        process(target_path, args.recursive, args.dry_run, args.overwrite, args.debug, args.cleanup)
+    else:
+        # Process the subdirectory within the root repo context
+        process_subdirectory(root_repo, target_path, args.recursive, args.dry_run, args.overwrite, args.debug, args.cleanup)
 
 if __name__ == "__main__":
     main()
