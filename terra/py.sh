@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
 """
-Convert Maven POM projects to Gradle Kotlin DSL builds.
+Convert Maven POM projects to Gradle Kotlin DSL builds **and keep the repo-wide
+`gradle/libs.versions.toml` in sync**.
 
-After you merge a folder containing Maven modules into your mono-repo, run:
-
+Usage
+-----
     python maven_to_gradle.py /path/to/repo -r --init
 
-Options
--------
--r | --recursive   : walk the directory tree; otherwise only root is scanned
---init             : call `gradle init` once at repo root (if Gradle wrapper not present)
---dry-run          : print the build scripts to stdout instead of writing them
---overwrite        : overwrite existing `build.gradle.kts` files (otherwise the file is skipped)
+Key behaviour
+-------------
+* Walks the repo (optionally recursive), skipping the aggregator / root POM.
+* For every leaf POM writes a `build.gradle.kts` that:
+  * sets `group` + `version`
+  * lists dependencies, resolving each coordinate to `libs.<alias>` **if the
+    module already exists in `libs.versions.toml`**.
+  * When the module is **missing** from the version catalog the script:
+        1. Generates a deterministic alias (e.g. `jakarta_annotation_api`).
+        2. **Appends** the new entry to the catalog.
+        3. Uses that alias in the generated build file.
+* `--init` bootstraps the Gradle wrapper (`gradle init`) once if absent.
+* `--dry-run` prints would-be changes. `--overwrite` rewrites existing build
+  files.
 
-The script skips the top-level/root POM and any POMs that declare modules, and
-writes `build.gradle.kts` next to every leaf-module `pom.xml` it finds.
-
-For each dependency it tries to resolve an alias in `gradle/libs.versions.toml`.
-If a matching alias is found it emits the canonical `libs.<alias>` notation; if
-not, the literal GAV coordinate is used.
-
-Known limitations
------------------
-* Maven plugin configuration is **not** migrated – add these manually.
-* Only `compile`, `runtime`, `provided`, and `test` scopes are handled.
-* No support for property interpolation (${...}) in POMs.
-* Parent GAV inheritance is flattened, but profiles are ignored.
+Limitations
+-----------
+* Maven plugin configuration is *not* migrated.
+* Only scopes `compile`, `runtime`, `provided`, `test` are handled.
+* Does not evaluate Maven profiles / properties.
 """
-
 from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import subprocess
 import sys
 import textwrap
@@ -49,7 +50,7 @@ except ModuleNotFoundError:  # pragma: no cover
         sys.exit(1)
 
 # --------------------------------------------------------------------------------------
-# Data classes
+# Data classes / constants
 # --------------------------------------------------------------------------------------
 
 ScopeMapping = {
@@ -79,16 +80,61 @@ class PomInfo:
     dependencies: List[Dependency] = field(default_factory=list)
 
 # --------------------------------------------------------------------------------------
-# Utility functions
+# Catalog helpers
+# --------------------------------------------------------------------------------------
+
+def load_catalog(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str], List[str]]:
+    """Return (path, module→alias map, file lines). Creates catalog if missing."""
+    catalog_path = repo_root / "gradle" / "libs.versions.toml"
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    if not catalog_path.exists():
+        catalog_path.write_text("[libraries]\n", encoding="utf-8")
+    lines = catalog_path.read_text(encoding="utf-8").splitlines()
+
+    try:
+        data = tomllib.loads("\n".join(lines))
+    except Exception as exc:  # malformed TOML – bail out
+        print(f"ERROR: Cannot parse libs.versions.toml: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    libraries = data.get("libraries", {})
+    module_to_alias = {}
+    for alias, entry in libraries.items():
+        module = entry["module"] if isinstance(entry, dict) else entry.split(":", 2)[:2]
+        if isinstance(module, list):
+            module = ":".join(module)
+        module_to_alias[module] = alias
+    return catalog_path, module_to_alias, lines
+
+
+def normalise_alias(dep: Dependency, existing_aliases: Dict[str, str]) -> str:
+    """Generate a kebab-/snake-case alias unique in the catalog."""
+    base = re.sub(r"[^a-z0-9]+", "_", dep.artifact.lower()).strip("_")
+    alias = base
+    i = 2
+    while alias in existing_aliases.values():
+        alias = f"{base}_{i}"
+        i += 1
+    return alias
+
+
+def append_alias(catalog_lines: List[str], alias: str, dep: Dependency):
+    """Append a TOML entry for the library using string shorthand."""
+    # ensure [libraries] header exists
+    if not any(line.strip() == "[libraries]" for line in catalog_lines):
+        catalog_lines.append("[libraries]")
+    catalog_lines.append(f"{alias} = \"{dep.group}:{dep.artifact}:{dep.version}\"")
+
+# --------------------------------------------------------------------------------------
+# POM parsing helpers
 # --------------------------------------------------------------------------------------
 
 def find_poms(root: pathlib.Path, recursive: bool) -> List[pathlib.Path]:
     pattern = "**/pom.xml" if recursive else "pom.xml"
-    return [p for p in root.glob(pattern)]
+    return list(root.glob(pattern))
 
 
 def is_root_pom(pom_path: pathlib.Path, repo_root: pathlib.Path) -> bool:
-    """Treat the pom in repo root as root POM; also, any pom with <modules>."""
     if pom_path.parent == repo_root:
         return True
     try:
@@ -122,39 +168,31 @@ def parse_pom(path: pathlib.Path) -> PomInfo:
 
     return PomInfo(group, artifact, version, packaging, deps)
 
+# --------------------------------------------------------------------------------------
+# Gradle build generation
+# --------------------------------------------------------------------------------------
 
-def load_version_aliases(repo_root: pathlib.Path) -> Dict[str, str]:
-    libs_file = repo_root / "gradle" / "libs.versions.toml"
-    if not libs_file.exists():
-        return {}
-    with libs_file.open("rb") as fh:
-        data = tomllib.load(fh)
-
-    alias_map: Dict[str, str] = {}
-    libs_table = data.get("libraries", {})
-    for alias, entry in libs_table.items():
-        module = entry["module"] if isinstance(entry, dict) else entry
-        alias_map[module] = alias
-    return alias_map
-
-
-def gradle_notation(dep: Dependency, alias_map: Dict[str, str]) -> Tuple[str, str]:
-    """Return (configuration, dependency line)"""
+def gradle_line(dep: Dependency, module_to_alias: Dict[str, str], catalog_lines: List[str]) -> Tuple[str, str]:
     conf = ScopeMapping.get(dep.scope, "implementation")
     module = dep.module_notation()
-    if module in alias_map:
-        return conf, f"libs.{alias_map[module]}"
-    elif dep.version:
-        return conf, f'"{module}:{dep.version}"'
-    else:
-        # Fallback to versionless; assumes version comes transitively
-        return conf, f'"{module}"'
+
+    if module in module_to_alias:
+        return conf, f"libs.{module_to_alias[module]}"
+
+    # missing → create alias & update catalog
+    if dep.version is None:
+        raise ValueError(f"No version specified for dependency {module}")
+
+    alias = normalise_alias(dep, module_to_alias)
+    append_alias(catalog_lines, alias, dep)
+    module_to_alias[module] = alias  # update mapping for subsequent deps
+    return conf, f"libs.{alias}"
 
 
-def generate_build_kts(info: PomInfo, alias_map: Dict[str, str]) -> str:
+def generate_build_kts(info: PomInfo, module_to_alias: Dict[str, str], catalog_lines: List[str]) -> str:
     dep_lines: Dict[str, List[str]] = {}
     for dep in info.dependencies:
-        conf, notation = gradle_notation(dep, alias_map)
+        conf, notation = gradle_line(dep, module_to_alias, catalog_lines)
         dep_lines.setdefault(conf, []).append(notation)
 
     deps_block = "\n".join(
@@ -176,30 +214,40 @@ def generate_build_kts(info: PomInfo, alias_map: Dict[str, str]) -> str:
         """
     ).strip() + "\n"
 
-
 # --------------------------------------------------------------------------------------
 # Core processing
 # --------------------------------------------------------------------------------------
 
 def process_repo(repo_root: pathlib.Path, recursive: bool, dry_run: bool, overwrite: bool):
-    alias_map = load_version_aliases(repo_root)
+    catalog_path, module_to_alias, catalog_lines = load_catalog(repo_root)
+
     poms = find_poms(repo_root, recursive)
     for pom in poms:
         if is_root_pom(pom, repo_root):
             continue
         info = parse_pom(pom)
-        build_kts = generate_build_kts(info, alias_map)
+        try:
+            build_kts = generate_build_kts(info, module_to_alias, catalog_lines)
+        except ValueError as err:
+            print(f"WARN  {pom.relative_to(repo_root)} → {err}")
+            continue
+
         target_file = pom.parent / "build.gradle.kts"
         if target_file.exists() and not overwrite:
             print(f"SKIP  {target_file.relative_to(repo_root)} (exists)")
-            continue
-        if dry_run:
-            print(f"----- {target_file.relative_to(repo_root)} -----")
-            print(build_kts)
-            print()
         else:
-            target_file.write_text(build_kts, encoding="utf-8")
-            print(f"WRITE {target_file.relative_to(repo_root)}")
+            if dry_run:
+                print(f"----- {target_file.relative_to(repo_root)} -----")
+                print(build_kts)
+                print()
+            else:
+                target_file.write_text(build_kts, encoding="utf-8")
+                print(f"WRITE {target_file.relative_to(repo_root)}")
+
+    # flush catalog changes
+    if not dry_run:
+        catalog_path.write_text("\n".join(catalog_lines) + "\n", encoding="utf-8")
+        print(f"UPDATED {catalog_path.relative_to(repo_root)}")
 
 
 def ensure_gradle_wrapper(repo_root: pathlib.Path):
@@ -208,13 +256,12 @@ def ensure_gradle_wrapper(repo_root: pathlib.Path):
     print("Running 'gradle init' to bootstrap wrapper…")
     subprocess.run(["gradle", "--no-daemon", "init", "--type", "java-library"], cwd=repo_root, check=True)
 
-
 # --------------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert Maven POMs to Gradle build.gradle.kts files.")
+    parser = argparse.ArgumentParser(description="Convert Maven POMs to Gradle build.gradle.kts files and maintain version catalog.")
     parser.add_argument("path", type=pathlib.Path, help="Path to repo root")
     parser.add_argument("-r", "--recursive", action="store_true", help="Recurse into sub-directories")
     parser.add_argument("--init", action="store_true", help="Run 'gradle init' if wrapper missing")
@@ -230,7 +277,6 @@ def main():
         ensure_gradle_wrapper(repo_root)
 
     process_repo(repo_root, args.recursive, args.dry_run, args.overwrite)
-
 
 if __name__ == "__main__":
     main()
