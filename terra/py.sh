@@ -92,14 +92,20 @@ def load_settings(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str]
         m = re.match(r'\s*include\(\s*"(:[^"]+)"\s*\)', line)
         if m:
             path = m.group(1)
-            artifact = path.strip(":").split(":")[-1]
+            # Handle both simple module names and monorepo module names (e.g., "remote-compute:module")
+            if ":" in path:
+                # Monorepo module: extract the full module name
+                artifact = path.strip(":")
+            else:
+                # Simple module: extract just the artifact name
+                artifact = path.strip(":").split(":")[-1]
             includes[artifact] = path
     return settings_path, includes, lines
 
 
 def add_module_to_settings(lines: List[str], artifact: str, path_rel: str):
     include_line = f'include(":{artifact}")'
-    # Use absolute path from root for projectDir
+    # Use relative path from root for projectDir in monorepo
     dir_line = f'project(":{artifact}").projectDir = file("{path_rel}")'
     lines.extend([include_line, dir_line])
 
@@ -223,11 +229,12 @@ def parse_pom(path: pathlib.Path, root_props: Dict[str, str]) -> PomInfo:
 # Dependency translation
 # --------------------------------------------------------------------------------------
 
-def gradle_line(dep: Dependency, mod_map: Dict[str, str], cat_lines: List[str], settings_map: Dict[str, str]) -> Tuple[str, str]:
+def gradle_line(dep: Dependency, mod_map: Dict[str, str], cat_lines: List[str], settings_map: Dict[str, str], current_module_name: str) -> Tuple[str, str]:
     conf = ScopeMapping.get(dep.scope, "implementation")
 
     # Internal module → project dependency
     if dep.group.startswith(INTERNAL_PREFIX):
+        # Try to find the module in settings_map, fallback to simple artifact name
         path = settings_map.get(dep.artifact, f":{dep.artifact}")
         return conf, f"project(\"{path}\")"
 
@@ -245,11 +252,11 @@ def gradle_line(dep: Dependency, mod_map: Dict[str, str], cat_lines: List[str], 
     return conf, f"libs.{alias}"
 
 
-def build_script(info: PomInfo, mod_map: Dict[str, str], cat_lines: List[str], settings_map: Dict[str, str]) -> str:
+def build_script(info: PomInfo, mod_map: Dict[str, str], cat_lines: List[str], settings_map: Dict[str, str], module_name: str) -> str:
     buckets: Dict[str, List[str]] = {}
     for dep in info.dependencies:
         try:
-            conf, line = gradle_line(dep, mod_map, cat_lines, settings_map)
+            conf, line = gradle_line(dep, mod_map, cat_lines, settings_map, module_name)
         except ValueError as err:
             print(f"WARN  {info.artifact}: {err}")
             continue
@@ -289,15 +296,24 @@ def process(repo: pathlib.Path, recursive: bool, dry: bool, overwrite: bool):
             continue
         info = parse_pom(pom, root_props)
 
+        # Calculate module name for monorepo structure
+        # If pom is in a subdirectory of repo, use that as prefix
+        rel_to_repo = pom.parent.relative_to(repo)
+        if rel_to_repo == pathlib.Path("."):
+            module_name = info.artifact
+        else:
+            # For monorepo: use subdirectory as prefix
+            module_name = f"{rel_to_repo.parts[0]}:{info.artifact}"
+        
         # ensure current module is in settings (internal project itself)
-        if info.group.startswith(INTERNAL_PREFIX) and info.artifact not in settings_map:
+        if info.group.startswith(INTERNAL_PREFIX) and module_name not in settings_map:
             rel_path = pom.parent.relative_to(repo).as_posix()
-            add_module_to_settings(settings_lines, info.artifact, rel_path)
-            settings_map[info.artifact] = f":{info.artifact}"
-            new_module_lines.append(f'include(":{info.artifact}")')
-            new_module_lines.append(f'project(":{info.artifact}").projectDir = file("{rel_path}")')
+            add_module_to_settings(settings_lines, module_name, rel_path)
+            settings_map[module_name] = f":{module_name}"
+            new_module_lines.append(f'include(":{module_name}")')
+            new_module_lines.append(f'project(":{module_name}").projectDir = file("{rel_path}")')
 
-        script_text = build_script(info, mod_map, cat_lines, settings_map)
+        script_text = build_script(info, mod_map, cat_lines, settings_map, module_name)
         out_file = pom.parent / "build.gradle.kts"
         if out_file.exists() and not overwrite:
             print(f"SKIP  {out_file.relative_to(repo)} (exists)")
