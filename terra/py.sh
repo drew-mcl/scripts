@@ -99,6 +99,7 @@ def load_settings(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str]
 
 def add_module_to_settings(lines: List[str], artifact: str, path_rel: str):
     include_line = f'include(":{artifact}")'
+    # Use absolute path from root for projectDir
     dir_line = f'project(":{artifact}").projectDir = file("{path_rel}")'
     lines.extend([include_line, dir_line])
 
@@ -129,12 +130,16 @@ def load_catalog(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str],
     catalog = repo_root / "gradle" / "libs.versions.toml"
     catalog.parent.mkdir(parents=True, exist_ok=True)
     if not catalog.exists():
-        catalog.write_text("[libraries]\n", encoding="utf-8")
+        catalog.write_text("[versions]\n[libraries]\n", encoding="utf-8")
     raw_lines = catalog.read_text(encoding="utf-8").splitlines()
     data = tomllib.loads("\n".join(raw_lines))
     mapping = {}
     for alias, entry in data.get("libraries", {}).items():
-        module = entry["module"] if isinstance(entry, dict) else ":".join(entry.split(":")[:2])
+        if isinstance(entry, dict) and "module" in entry:
+            module = entry["module"]
+        else:
+            # Handle old format for backward compatibility
+            module = ":".join(entry.split(":")[:2]) if isinstance(entry, str) else ""
         mapping[module] = alias
     return catalog, mapping, raw_lines
 
@@ -150,9 +155,21 @@ def normalise_alias(artifact: str, taken: Dict[str, str]) -> str:
 
 
 def append_library(lines: List[str], alias: str, dep: Dependency):
-    if not any(l.strip() == "[libraries]" for l in lines):
+    # Ensure we have both [versions] and [libraries] sections
+    has_versions = any(l.strip() == "[versions]" for l in lines)
+    has_libraries = any(l.strip() == "[libraries]" for l in lines)
+    
+    if not has_versions:
+        lines.append("[versions]")
+    if not has_libraries:
         lines.append("[libraries]")
-    lines.append(f"{alias} = \"{dep.group}:{dep.artifact}:{dep.version}\"")
+    
+    # Add version entry
+    version_alias = f"{alias}_version"
+    lines.append(f'{version_alias} = "{dep.version}"')
+    
+    # Add library entry with version reference
+    lines.append(f'{alias} = {{ module = "{dep.group}:{dep.artifact}", version.ref = "{version_alias}" }}')
 
 # --------------------------------------------------------------------------------------
 # POM parsing
@@ -260,6 +277,7 @@ def build_script(info: PomInfo, mod_map: Dict[str, str], cat_lines: List[str], s
 # --------------------------------------------------------------------------------------
 
 def process(repo: pathlib.Path, recursive: bool, dry: bool, overwrite: bool):
+    # Always use root repo for catalog and settings
     catalog_path, mod_map, cat_lines = load_catalog(repo)
     settings_path, settings_map, settings_lines = load_settings(repo)
     root_props = load_root_properties(repo)
