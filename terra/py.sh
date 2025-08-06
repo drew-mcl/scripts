@@ -51,7 +51,6 @@ except ModuleNotFoundError:  # pragma: no cover
 # Constants & Data Classes
 # --------------------------------------------------------------------------------------
 
-INTERNAL_PREFIX = "com.barclays.asgard"
 ScopeMapping = {
     "compile": "implementation",
     "runtime": "runtimeOnly",
@@ -97,8 +96,8 @@ def find_repo_root(start_path: pathlib.Path) -> Optional[pathlib.Path]:
     return None
 
 
-def load_settings(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str], List[str]]:
-    """Loads settings.gradle.kts, returning its path, a map of existing modules, and its lines."""
+def load_settings(repo_root: pathlib.Path) -> Tuple[pathlib.Path, set, List[str]]:
+    """Loads settings.gradle.kts, returning its path, a set of existing modules, and its lines."""
     settings_path = repo_root / "settings.gradle.kts"
     if not settings_path.exists():
         settings_path.write_text('rootProject.name = "monorepo"\n', encoding="utf-8")
@@ -110,6 +109,13 @@ def load_settings(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str]
         if (m := re.match(r'\s*include\(\s*"(:.+)"\s*\)', line))
     }
     return settings_path, includes, lines
+
+
+def add_module_to_settings(lines: List[str], artifact: str, path_rel: str):
+    """Add a module to settings.gradle.kts."""
+    include_line = f'include(":{artifact}")'
+    dir_line = f'project(":{artifact}").projectDir = file("{path_rel}")'
+    lines.extend([include_line, dir_line])
 
 
 def load_catalog(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str], List[str]]:
@@ -156,6 +162,11 @@ def load_root_config(repo_root: pathlib.Path) -> Tuple[Dict[str, str], Dict[str,
 # --------------------------------------------------------------------------------------
 # POM Parsing
 # --------------------------------------------------------------------------------------
+
+def find_poms(root: pathlib.Path, recursive: bool) -> List[pathlib.Path]:
+    """Find all pom.xml files in the given directory."""
+    return list(root.glob("**/pom.xml" if recursive else "pom.xml"))
+
 
 def is_aggregator(pom_path: pathlib.Path) -> bool:
     """Check if a POM is just an aggregator (<packaging>pom</packaging>)."""
@@ -310,8 +321,8 @@ def main():
     print(f"Processing Target: {target_path}")
 
     # --- Step 1: Discover all POMs and internal modules ---
-    glob_pattern = "**/*.pom" if args.recursive else "*.pom"
-    all_poms = [p for p in target_path.glob(glob_pattern) if p.name == "pom.xml" and not is_aggregator(p)]
+    glob_pattern = "**/pom.xml" if args.recursive else "pom.xml"
+    all_poms = [p for p in target_path.glob(glob_pattern) if not is_aggregator(p)]
     
     root_props, managed_deps = load_root_config(repo_root)
     parsed_poms = [parse_pom(p, root_props, managed_deps) for p in all_poms]
@@ -321,7 +332,7 @@ def main():
     
     # --- Step 2: Load Gradle configs ---
     catalog_path, catalog_map, catalog_lines = load_catalog(repo_root)
-    settings_path, settings_map, settings_lines = load_settings(repo_root)
+    settings_path, settings_set, settings_lines = load_settings(repo_root)
     original_catalog_lines = list(catalog_lines)
     original_settings_lines = list(settings_lines)
 
@@ -331,10 +342,10 @@ def main():
         gradle_path = internal_modules[info.artifact]
         
         # Add module to settings.gradle.kts if it's new
-        if gradle_path not in settings_map:
+        if gradle_path not in settings_set:
             relative_dir = info.path.parent.relative_to(repo_root).as_posix()
             settings_lines.extend(['', f'include("{gradle_path}")', f'project("{gradle_path}").projectDir = file("{relative_dir}")'])
-            settings_map.add(gradle_path) # Track new additions
+            settings_set.add(gradle_path) # Track new additions
             print(f"INFO  New module found: {gradle_path}")
 
         # Generate build.gradle.kts
