@@ -89,7 +89,7 @@ def load_settings(repo_root: pathlib.Path) -> Tuple[pathlib.Path, Dict[str, str]
 
     includes = {}
     for line in lines:
-        m = re.match(r"\s*include\(\s*\"(:[^"]+)\"\s*\)", line)
+        m = re.match(r'\s*include\(\s*"(:[^"]+)"\s*\)', line)
         if m:
             path = m.group(1)
             artifact = path.strip(":").split(":")[-1]
@@ -276,7 +276,8 @@ def process(repo: pathlib.Path, recursive: bool, dry: bool, overwrite: bool):
             rel_path = pom.parent.relative_to(repo).as_posix()
             add_module_to_settings(settings_lines, info.artifact, rel_path)
             settings_map[info.artifact] = f":{info.artifact}"
-            new_module_lines.appendInfo = True
+            new_module_lines.append(f'include(":{info.artifact}")')
+            new_module_lines.append(f'project(":{info.artifact}").projectDir = file("{rel_path}")')
 
         script_text = build_script(info, mod_map, cat_lines, settings_map)
         out_file = pom.parent / "build.gradle.kts"
@@ -293,7 +294,7 @@ def process(repo: pathlib.Path, recursive: bool, dry: bool, overwrite: bool):
     if dry:
         if new_module_lines:
             print("----- settings.gradle.kts additions -----")
-            for l in new_module_lines[-len(new_module_lines):]:
+            for l in new_module_lines:
                 print(l)
             print()
     else:
