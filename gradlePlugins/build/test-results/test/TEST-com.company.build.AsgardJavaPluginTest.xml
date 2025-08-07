@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.company.build.AsgardJavaPluginTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2025-08-07T19:57:56.535Z" hostname="Mac" time="0.001">
+  <properties/>
+  <testcase name="plugin class exists" classname="com.company.build.AsgardJavaPluginTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

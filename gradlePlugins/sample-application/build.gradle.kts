@@ -6,7 +6,9 @@ group = "com.example"
 version = "1.0.0"
 
 repositories {
+    mavenLocal()
     mavenCentral()
+    gradlePluginPortal()
 }
 
 dependencies {
@@ -16,6 +18,10 @@ dependencies {
 // Example configuration for an application
 asgard {
     java17 = true
+    java8 = true
     buildType = "application"
     applicationMainClass = "com.example.SampleApplication"
+    enableCodeQuality = true
 }
+
+

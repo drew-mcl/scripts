@@ -1,0 +1,80 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "com.company.build",
+    "module": "asgard-java-plugin",
+    "version": "1.0.0",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "9.0.0"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.jvm.version": 17,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "files": [
+        {
+          "name": "asgard-java-plugin-1.0.0.jar",
+          "url": "asgard-java-plugin-1.0.0.jar",
+          "size": 10230,
+          "sha512": "56c996f1438e81269ed8e4d1fde744313716bf045383f4329abb722ae7de64a6ba976060978556d6358c12ba5ad6bce12f9da1f521d8e6bbcffd56da1534838b",
+          "sha256": "72336cc0d92c89bd454b2c5ddc507a716992b3b5f3ee09b7ab3e9675f0c28546",
+          "sha1": "fef8485f3f998fbf1487859783184ebb18e5695c",
+          "md5": "7952753a3c3ceaf146f8eb8509622a25"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.jvm.version": 17,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-gradle-plugin",
+          "version": {
+            "requires": "1.8.20"
+          }
+        },
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib-jdk8",
+          "version": {
+            "requires": "1.8.20"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "asgard-java-plugin-1.0.0.jar",
+          "url": "asgard-java-plugin-1.0.0.jar",
+          "size": 10230,
+          "sha512": "56c996f1438e81269ed8e4d1fde744313716bf045383f4329abb722ae7de64a6ba976060978556d6358c12ba5ad6bce12f9da1f521d8e6bbcffd56da1534838b",
+          "sha256": "72336cc0d92c89bd454b2c5ddc507a716992b3b5f3ee09b7ab3e9675f0c28546",
+          "sha1": "fef8485f3f998fbf1487859783184ebb18e5695c",
+          "md5": "7952753a3c3ceaf146f8eb8509622a25"
+        }
+      ]
+    }
+  ]
+}

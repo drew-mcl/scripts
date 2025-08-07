@@ -1,14 +1,16 @@
-rootProject.name = "asgard-java-plugin"
+rootProject.name = "sample-application"
 
-pluginManagement {
+includeBuild("../")
+
+dependencyResolutionManagement {
     repositories {
         mavenLocal()
         mavenCentral()
         gradlePluginPortal()
     }
-}   
+}
 
-dependencyResolutionManagement {
+pluginManagement {
     repositories {
         mavenLocal()
         mavenCentral()

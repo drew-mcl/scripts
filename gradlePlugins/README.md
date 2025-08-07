@@ -48,6 +48,9 @@ asgard {
     // Build type (default: "library")
     buildType = "application"  // or "library"
     applicationMainClass = "com.example.MainClass"  // Required for application type
+    
+    // Code quality (default: false)
+    enableCodeQuality = true   // Enables PMD, Checkstyle, and JaCoCo
 }
 ```
 
@@ -84,6 +87,9 @@ asgard {
     applicationMainClass = "com.example.MyApplication"
     java17 = true
 }
+
+// Note: For application type, you need to manually configure the main class
+// The plugin will log the required configuration during build
 ```
 
 ## Tasks
@@ -117,3 +123,32 @@ When multiple Java versions are enabled, the plugin creates separate JARs:
 - `project-name-java21.jar`
 
 Each JAR includes the Java version in its manifest for identification.
+
+## Features
+
+### Multi-Java Version Support
+- **Single Version**: Creates a standard JAR (e.g., `project-name-1.0.0.jar`)
+- **Multiple Versions**: Creates versioned JARs (e.g., `project-name-1.0.0-java8.jar`, `project-name-1.0.0-java17.jar`)
+
+### Code Quality Support
+When `enableCodeQuality = true` is set, the plugin automatically configures:
+- **PMD**: Static code analysis with custom ruleset
+- **Checkstyle**: Code style enforcement
+- **JaCoCo**: Code coverage reporting
+
+### Test Configuration
+For Java 17 projects, the plugin provides guidance for test configuration including:
+- `--add-opens` flags for module access
+- System properties for consistent test execution
+
+## Current Limitations
+
+Due to Gradle API compatibility constraints with Java 17, the following limitations apply:
+
+1. **Application Main Class**: For `buildType = "application"`, the main class must be configured manually in the build script. The plugin will log the required configuration during build.
+
+2. **Test Configuration**: Java 17 test configuration (JVM args and system properties) must be added manually to the build script. The plugin provides guidance during build.
+
+3. **Code Quality Rules**: PMD and Checkstyle rules are provided as defaults but can be customized by placing custom rule files in `gradle/pmd/` and `gradle/checkstyle/` directories.
+
+These limitations are being addressed in future versions of the plugin.

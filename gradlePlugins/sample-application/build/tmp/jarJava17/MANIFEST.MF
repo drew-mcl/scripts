@@ -1,0 +1,4 @@
+Manifest-Version: 1.0
+Java-Version: 17
+Created-By: Asgard Build Plugin
+

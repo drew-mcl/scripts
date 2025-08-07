@@ -8,4 +8,5 @@ interface AsgardExtension {
     val java21: Property<Boolean>
     val buildType: Property<String>
     val applicationMainClass: Property<String>
+    val enableCodeQuality: Property<Boolean>
 }
