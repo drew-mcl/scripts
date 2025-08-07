@@ -51,6 +51,9 @@ asgard {
     
     // Code quality (default: false)
     enableCodeQuality = true   // Enables PMD, Checkstyle, and JaCoCo
+    
+    // Native tools (default: empty list)
+    nativeTools = listOf("journal", "uexe")  // Tools to include in distribution
 }
 ```
 
@@ -90,6 +93,29 @@ asgard {
 
 // Note: For application type, you need to manually configure the main class
 // The plugin will log the required configuration during build
+```
+
+#### Application with native tools
+```kotlin
+plugins {
+    id("com.company.build.asgard-java")
+}
+
+asgard {
+    buildType = "application"
+    applicationMainClass = "com.example.MyApplication"
+    java17 = true
+    nativeTools = listOf("journal", "uexe")
+}
+
+// Version catalog (gradle/libs.versions.toml)
+[versions]
+journal = "2.1.0"
+uexe = "1.5.2"
+
+[libraries]
+journal = { module = "com.company:journal", version.ref = "journal" }
+uexe = { module = "com.company:uexe", version.ref = "uexe" }
 ```
 
 ## Tasks
@@ -135,6 +161,12 @@ When `enableCodeQuality = true` is set, the plugin automatically configures:
 - **PMD**: Static code analysis with custom ruleset
 - **Checkstyle**: Code style enforcement
 - **JaCoCo**: Code coverage reporting
+
+### Native Tools Support
+When `nativeTools` is configured, the plugin:
+- Creates a `build/native` directory for native tools
+- Automatically includes native tools in application distributions
+- Integrates with version catalogs for centralized version management
 
 ### Test Configuration
 For Java 17 projects, the plugin provides guidance for test configuration including:

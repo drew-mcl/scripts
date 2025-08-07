@@ -1,0 +1,27 @@
+[versions]
+# Core versions
+kotlin = "1.8.20"
+gradle = "8.0"
+
+# Native tools versions
+journal = "2.1.0"
+uexe = "1.5.2"
+
+[libraries]
+# Native tools
+journal = { module = "com.company:journal", version.ref = "journal" }
+uexe = { module = "com.company:uexe", version.ref = "uexe" }
+
+# Test dependencies
+junit = { module = "junit:junit", version = "4.13.2" }
+
+[plugins]
+# Gradle plugins
+java-gradle-plugin = { id = "java-gradle-plugin", version = "1.0" }
+kotlin-dsl = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+maven-publish = { id = "maven-publish", version = "1.0" }
+
+# Code quality plugins
+checkstyle = { id = "checkstyle", version = "1.0" }
+pmd = { id = "pmd", version = "1.0" }
+jacoco = { id = "jacoco", version = "1.0" }

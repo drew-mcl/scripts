@@ -12,7 +12,7 @@ repositories {
 }
 
 dependencies {
-    testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.junit)
 }
 
 // Example configuration for an application
@@ -22,6 +22,7 @@ asgard {
     buildType = "application"
     applicationMainClass = "com.example.SampleApplication"
     enableCodeQuality = true
+    nativeTools = listOf("journal", "uexe")
 }
 
 

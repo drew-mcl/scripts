@@ -1,6 +1,7 @@
 package com.company.build
 
 import org.gradle.api.provider.Property
+import org.gradle.api.provider.ListProperty
 
 interface AsgardExtension {
     val java8: Property<Boolean>
@@ -9,4 +10,5 @@ interface AsgardExtension {
     val buildType: Property<String>
     val applicationMainClass: Property<String>
     val enableCodeQuality: Property<Boolean>
+    val nativeTools: ListProperty<String>
 }

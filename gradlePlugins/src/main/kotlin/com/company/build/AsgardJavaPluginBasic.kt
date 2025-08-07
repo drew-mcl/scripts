@@ -25,6 +25,7 @@ class AsgardJavaPluginBasic : Plugin<Project> {
         extension.buildType.convention("library")
         extension.applicationMainClass.convention("")
         extension.enableCodeQuality.convention(false)
+        extension.nativeTools.convention(project.objects.listProperty(String::class.java).empty())
         
         // Configure Java toolchain based on settings
         project.afterEvaluate {
@@ -32,6 +33,7 @@ class AsgardJavaPluginBasic : Plugin<Project> {
             configureBuildType(project, extension)
             configureMultiJavaVersionBuild(project, extension)
             configureTestSettings(project, extension)
+            configureNativeTools(project, extension)
             
             // Apply code quality plugin if enabled
             if (extension.enableCodeQuality.get()) {
@@ -158,6 +160,47 @@ class AsgardJavaPluginBasic : Plugin<Project> {
                     systemProperty("user.timezone", "UTC")
                 }
             """.trimIndent())
+        }
+    }
+    
+    private fun configureNativeTools(project: Project, extension: AsgardExtension) {
+        val nativeTools = extension.nativeTools.get()
+        
+        if (nativeTools.isNotEmpty()) {
+            // Create native tools directory
+            val nativeDir = project.file("build/native")
+            nativeDir.mkdirs()
+            
+            // Configure dependencies for native tools
+            project.configurations.create("nativeTools") {
+                isCanBeResolved = true
+                isCanBeConsumed = false
+            }
+            
+            // Add native tools to distribution if this is an application
+            if (extension.buildType.get() == "application") {
+                // Only configure distribution tasks if they exist
+                project.tasks.findByName("distTar")?.let { distTar ->
+                    distTar.dependsOn("copyNativeTools")
+                }
+                
+                project.tasks.findByName("distZip")?.let { distZip ->
+                    distZip.dependsOn("copyNativeTools")
+                }
+                
+                // Create task to copy native tools to distribution
+                project.tasks.register("copyNativeTools", org.gradle.api.tasks.Copy::class.java) {
+                    group = "distribution"
+                    description = "Copies native tools to distribution"
+                    
+                    from(nativeDir)
+                    into("${project.buildDir}/tmp/dist/native")
+                    
+                    doFirst {
+                        project.logger.lifecycle("Copying native tools to distribution...")
+                    }
+                }
+            }
         }
     }
 }
