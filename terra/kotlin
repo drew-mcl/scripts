@@ -1,0 +1,100 @@
+// build.gradle.kts – reusable code-gen conventions with flags and version-catalog support
+
+import com.google.protobuf.gradle.*
+import org.gradle.accessors.dm.LibrariesForLibs
+import org.gradle.kotlin.dsl.*
+
+plugins {
+    id("java")
+    // protobuf applied conditionally below when enabled
+}
+
+repositories { mavenCentral() }
+
+/* ----------------------------------------------------------
+ * 🔧  User-configurable flags (via -P on the command-line or
+ *     gradle.properties) – every module can override them.
+ * ---------------------------------------------------------- */
+val targetSourceSet: String = (findProperty("codegen.sourceSet") as String?) ?: "main"  // "main" | "test" | custom
+val enableSbe: Boolean      = (findProperty("codegen.enableSbe") as String?)?.toBoolean() ?: true
+val enableProto: Boolean    = (findProperty("codegen.enableProto") as String?)?.toBoolean() ?: true
+
+/* ----------------------------------------------------------
+ * 📦  Versions injected from the monorepo's libs.versions.toml
+ *      (falls back to sensible defaults if missing).
+ * ---------------------------------------------------------- */
+val libs = extensions.getByType<VersionCatalogsExtension>().named("libs")
+
+fun VersionCatalog.findVer(alias: String, def: String) =
+    findVersion(alias).orNull?.requiredVersion ?: def
+
+val sbeVersion        = libs.findVer("sbeTool", "1.35.6")
+val protocVersion     = libs.findVer("protoc",  "3.27.0")
+val grpcPluginVersion = libs.findVer("grpc",    "1.63.0")
+
+/* ----------------------------------------------------------
+ * 🔄  SBE – only when enabled
+ * ---------------------------------------------------------- */
+if (enableSbe) {
+    configurations.maybeCreate("sbe")
+    dependencies { "sbe"("uk.co.real-logic:sbe-tool:$sbeVersion") }
+}
+
+/* ----------------------------------------------------------
+ * 🧬  Protobuf – only when enabled
+ * ---------------------------------------------------------- */
+if (enableProto) {
+    plugins.apply("com.google.protobuf")
+
+    protobuf {
+        protoc { artifact = "com.google.protobuf:protoc:$protocVersion" }
+        plugins {
+            id("grpc") { artifact = "io.grpc:protoc-gen-grpc-java:$grpcPluginVersion" }
+        }
+        generateProtoTasks {
+            // honour the chosen source-set name
+            ofSourceSet(targetSourceSet).configureEach {
+                builtins { java {} }
+                plugins { id("grpc") }
+            }
+        }
+    }
+}
+
+/* ----------------------------------------------------------
+ * 🎯  Handle arbitrary source-set (main/test/…) uniformly
+ * ---------------------------------------------------------- */
+val selectedSourceSet = sourceSets.named(targetSourceSet).get()
+
+/* ----- SBE task wiring (per source-set) ----- */
+if (enableSbe) {
+    val sbeSchemas = selectedSourceSet.resources.matching { include("**/sbe/**/*.xml") }
+
+    val outDir = layout.buildDirectory.dir("generated-sbe/$targetSourceSet")
+
+    val generateSbe = tasks.register<JavaExec>("generateSbe${targetSourceSet.capitalize()}") {
+        group = "codegen"
+        description = "Generate SBE codecs for $targetSourceSet source-set"
+        classpath   = configurations["sbe"]
+        mainClass.set("uk.co.real_logic.sbe.SbeTool")
+        inputs.files(sbeSchemas)
+        outputs.dir(outDir)
+        args = listOf("--output-dir", outDir.get().asFile.absolutePath) +
+               sbeSchemas.files.map { it.absolutePath }
+    }
+
+    selectedSourceSet.java.srcDir(outDir.map { it.dir("java") })
+    tasks.named(selectedSourceSet.compileJavaTaskName) { dependsOn(generateSbe) }
+}
+
+/* ----- Protobuf generated sources location ----- */
+if (enableProto) {
+    selectedSourceSet.java.srcDir(layout.buildDirectory.dir("generated/source/proto/$targetSourceSet/java"))
+}
+
+/* ----------------------------------------------------------
+ * 🚫  Keep raw schemas out of the runtime artefact
+ * ---------------------------------------------------------- */
+tasks.named("processResources") {
+    (this as Copy).exclude("**/sbe/**", "**/protobuf/**")
+}
